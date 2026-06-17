@@ -2,3 +2,10 @@
 **/pkg
 node_modules
 .DS_Store
+
+# Local demo build (wasm-pack output + sample copy) - see README "Run the demo
+# locally". The published site is built fresh by .github/workflows/pages.yml.
+/demo/cog_tiler_wasm*
+/demo/package.json
+/demo/.gitignore
+/demo/sample-3857-cog.tif

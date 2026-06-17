@@ -36,7 +36,7 @@
     <div id="panel">
       <strong>cog-tiler-wasm</strong> — serverless COG tiling<br />
       <small>EPSG:3857 COG URL:</small>
-      <input id="url" value="" placeholder="https://.../cog-3857.tif" />
+      <input id="url" value="./sample-3857-cog.tif" placeholder="https://.../cog-3857.tif" />
       <div>
         rescale
         <input
@@ -44,11 +44,11 @@
           type="number"
           value="0"
           style="width: 70px"
-        />–<input id="max" type="number" value="3000" style="width: 70px" />
+        />–<input id="max" type="number" value="1100" style="width: 70px" />
         <select id="cmap">
+          <option selected>terrain</option>
           <option>viridis</option>
           <option>magma</option>
-          <option>terrain</option>
           <option>gray</option>
         </select>
         <button id="load">Load</button>
@@ -64,8 +64,10 @@
       import initWhitebox, {
         CogStream,
       } from "https://esm.sh/whitebox-wasm@0.4.0";
-      // The tiling brain (this crate).
-      import initTiler, { CogTiler } from "../crates/cog-tiler-wasm/pkg/cog_tiler_wasm.js";
+      // The tiling brain (this crate). The Pages workflow builds the wasm
+      // package next to this file; `?v=__BUILD__` is rewritten to the commit SHA
+      // on deploy so a fresh module never pairs with a stale cached loader.
+      import initTiler, { CogTiler } from "./cog_tiler_wasm.js?v=__BUILD__";
 
       await Promise.all([initWhitebox(), initTiler()]);
 
@@ -152,7 +154,7 @@
         return { data: await rgbaToPng(rgba) };
       });
 
-      document.getElementById("load").onclick = async () => {
+      async function load() {
         const url = document.getElementById("url").value.trim();
         if (!url) return;
         status("opening COG…");
@@ -167,10 +169,22 @@
             tileSize: 256,
           });
           map.addLayer({ id: "cog", type: "raster", source: "cog" });
+          // Zoom to the data: bounds_lonlat() -> [minlon,minlat,maxlon,maxlat].
+          const b = Array.from(current.stream.bounds_lonlat());
+          if (b.length === 4) {
+            map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 20, duration: 0 });
+          }
         } catch (e) {
           status("error: " + e);
         }
-      };
+      }
+
+      document.getElementById("load").onclick = load;
+      // Auto-load the prefilled sample so the demo works on first visit.
+      if (document.getElementById("url").value.trim()) {
+        if (map.loaded()) load();
+        else map.on("load", load);
+      }
 
       // --- small helpers --------------------------------------------------
 
