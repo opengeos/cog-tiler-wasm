@@ -164,12 +164,13 @@
         // Warp path: read the real source CRS + optional palette from the header
         // (whitebox doesn't expose them) and set up the 3857 -> source transform.
         const tiff = await GeoTIFF.fromUrl(url);
-        const geoKeys = (await tiff.getImage()).getGeoKeys();
+        const img = await tiff.getImage();
+        const geoKeys = img.getGeoKeys();
         const srcDef = geokeysToProj4.toProj4(geoKeys).proj4;
         if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
         const toSource = proj4("EPSG:3857", srcDef); // forward: mercator -> source
         const toLonLat = proj4(srcDef, "EPSG:4326"); // forward: source -> lon/lat
-        const palette = buildPalette((await tiff.getImage()).fileDirectory.ColorMap);
+        const palette = buildPalette(img.fileDirectory.ColorMap);
 
         // fitBounds bounds: transform the source corners to lon/lat.
         const fw = levels[0].width, fh = levels[0].height;
