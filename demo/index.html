@@ -102,13 +102,32 @@
       // Build a {stream, tiler, levels} bundle for a COG URL.
       async function openCog(url) {
         const range = rangeFetcher(url);
-        const stream = new CogStream(await range(0, 65535)); // header only
+        // Parse the COG header. Large COGs (many overviews / huge tile-offset
+        // arrays) have headers bigger than 64 KB, so grow the prefix and retry.
+        let stream;
+        for (let len = 65536; ; len *= 8) {
+          try {
+            stream = new CogStream(await range(0, len - 1));
+            break;
+          } catch (e) {
+            if (len >= 1 << 25) throw e; // give up past ~32 MB
+          }
+        }
         const gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
         // levels: [{level,width,height,tile_width,tile_height,tiles_x,tiles_y,
         //           bands,bits_per_sample,sample_format,compression}, ...]
         const levels = JSON.parse(stream.levels_json());
         if (!Array.isArray(levels) || levels.length === 0) {
           throw new Error("levels_json() returned no levels");
+        }
+        // v1 supports EPSG:3857 only. Reject other CRSs up front with a clear
+        // message instead of failing silently per-tile inside the protocol
+        // handler (e.g. NLCD is Albers, so the map would just stay blank).
+        if (stream.epsg !== 3857) {
+          const crs = stream.epsg ? "EPSG:" + stream.epsg : "non-3857 / unknown";
+          throw new Error(
+            `source CRS is ${crs}; this demo (v1) renders EPSG:3857 only - reproject the COG to 3857 first`,
+          );
         }
         // CogStream getters are Option -> a number or `undefined` (not NaN).
         const tiler = new CogTiler(
@@ -119,7 +138,33 @@
           stream.nodata, // undefined => no nodata
           JSON.stringify(levels),
         );
-        return { stream, tiler, range, levels };
+        // tileCache: decoded source tiles keyed by "level/col/row". Caching the
+        // decode (not just the bytes) means panning/zooming reuses overlapping
+        // source tiles instead of re-fetching and re-decoding them.
+        return { stream, tiler, range, levels, tileCache: new Map() };
+      }
+
+      // Fetch + decode one source tile, deduped and cached. Stores the promise
+      // so concurrent map tiles needing the same source tile share one request.
+      const MAX_CACHED_TILES = 256; // ~0.5 MB each at 256x256 f64
+      function getTile(cur, level, t) {
+        const key = level + "/" + t.col + "/" + t.row;
+        let p = cur.tileCache.get(key);
+        if (!p) {
+          p = cur
+            .range(t.offset, t.offset + t.length - 1)
+            .then((bytes) => cur.stream.decode_tile_f64(level, bytes))
+            .catch((err) => {
+              // Don't cache failures, so a transient error can be retried.
+              cur.tileCache.delete(key);
+              throw err;
+            });
+          cur.tileCache.set(key, p);
+          if (cur.tileCache.size > MAX_CACHED_TILES) {
+            cur.tileCache.delete(cur.tileCache.keys().next().value); // evict oldest
+          }
+        }
+        return p;
       }
 
       let current = null;
@@ -127,7 +172,7 @@
       // MapLibre custom protocol: cog://{z}/{x}/{y}
       maplibregl.addProtocol("cog", async (params) => {
         if (!current) return { data: new Uint8Array() };
-        const { stream, tiler, range, levels } = current;
+        const { stream, tiler, levels } = current;
         const m = params.url.match(/cog:\/\/(\d+)\/(\d+)\/(\d+)/);
         const [z, x, y] = m.slice(1).map(Number);
 
@@ -140,12 +185,13 @@
         const tiles = JSON.parse(
           stream.tiles_for_window(win.level, win.x, win.y, win.w, win.h),
         );
+        // Fetch + decode all covering tiles in parallel (cached/deduped), then
+        // assemble them into a row-major f64 window.
+        const decoded = await Promise.all(
+          tiles.map((t) => getTile(current, win.level, t)),
+        );
         const window = new Float64Array(win.w * win.h);
-        for (const t of tiles) {
-          const bytes = await range(t.offset, t.offset + t.length - 1);
-          const px = stream.decode_tile_f64(win.level, bytes); // tile-sized f64
-          blit(px, t, win, lv, window); // place tile into the window
-        }
+        tiles.forEach((t, i) => blit(decoded[i], t, win, lv, window));
 
         const min = +document.getElementById("min").value;
         const max = +document.getElementById("max").value;
