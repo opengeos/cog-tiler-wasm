@@ -35,7 +35,7 @@
   <body>
     <div id="panel">
       <strong>cog-tiler-wasm</strong> — serverless COG tiling<br />
-      <small>EPSG:3857 COG URL:</small>
+      <small>COG URL (EPSG:3857, or any projected/4326 - warped on the fly):</small>
       <input id="url" value="./sample-3857-cog.tif" placeholder="https://.../cog-3857.tif" />
       <div>
         rescale
@@ -69,7 +69,26 @@
       // on deploy so a fresh module never pairs with a stale cached loader.
       import initTiler, { CogTiler } from "./cog_tiler_wasm.js?v=__BUILD__";
 
+      // For non-3857 sources we warp on the fly. whitebox-wasm 0.4.0 does not
+      // expose the source projection or color table, so geotiff.js reads those
+      // from the COG header and proj4js does the coordinate transform.
+      import proj4 from "https://esm.sh/proj4@2.20.9";
+      // Pin geotiff 2.x: 3.x defers tag reads, so fileDirectory.ColorMap is empty.
+      import * as GeoTIFF from "https://esm.sh/geotiff@2.1.3";
+      import geokeysToProj4 from "https://esm.sh/geotiff-geokeys-to-proj4@2024.4.13";
+
+      proj4.defs(
+        "EPSG:3857",
+        "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs",
+      );
+
       await Promise.all([initWhitebox(), initTiler()]);
+
+      const OS = 20037508.342789244; // Web Mercator half-extent (m)
+      function tileBounds3857(z, x, y) {
+        const span = (2 * OS) / 2 ** z;
+        return [-OS + x * span, OS - (y + 1) * span, -OS + (x + 1) * span, OS - y * span];
+      }
 
       const status = (m) => (document.getElementById("status").textContent = m);
 
@@ -120,28 +139,68 @@
         if (!Array.isArray(levels) || levels.length === 0) {
           throw new Error("levels_json() returned no levels");
         }
-        // v1 supports EPSG:3857 only. Reject other CRSs up front with a clear
-        // message instead of failing silently per-tile inside the protocol
-        // handler (e.g. NLCD is Albers, so the map would just stay blank).
-        if (stream.epsg !== 3857) {
-          const crs = stream.epsg ? "EPSG:" + stream.epsg : "non-3857 / unknown";
-          throw new Error(
-            `source CRS is ${crs}; this demo (v1) renders EPSG:3857 only - reproject the COG to 3857 first`,
-          );
-        }
-        // CogStream getters are Option -> a number or `undefined` (not NaN).
+        // tileCache: decoded source tiles keyed by "level/col/row". Caching the
+        // decode (not just the bytes) lets panning/zooming reuse overlapping
+        // source tiles instead of re-fetching and re-decoding them.
+        const base = { stream, range, levels, gt, nodata: stream.nodata, tileCache: new Map() };
+
+        // CogTiler renders an assembled f64 window -> RGBA (rescale + colormap +
+        // nodata). render() ignores the CRS, so we build one in both modes.
         const tiler = new CogTiler(
           Float64Array.from(gt),
           levels[0].width,
           levels[0].height,
-          stream.epsg, // must be 3857 in v1
-          stream.nodata, // undefined => no nodata
+          3857,
+          stream.nodata,
           JSON.stringify(levels),
         );
-        // tileCache: decoded source tiles keyed by "level/col/row". Caching the
-        // decode (not just the bytes) means panning/zooming reuses overlapping
-        // source tiles instead of re-fetching and re-decoding them.
-        return { stream, tiler, range, levels, tileCache: new Map() };
+
+        if (stream.epsg === 3857) {
+          // Fast path: source is already Web Mercator, tile windows map affinely.
+          const b = Array.from(stream.bounds_lonlat());
+          return { ...base, mode: "3857", tiler, crsLabel: "EPSG:3857", boundsLonLat: b };
+        }
+
+        // Warp path: read the real source CRS + optional palette from the header
+        // (whitebox doesn't expose them) and set up the 3857 -> source transform.
+        const tiff = await GeoTIFF.fromUrl(url);
+        const geoKeys = (await tiff.getImage()).getGeoKeys();
+        const srcDef = geokeysToProj4.toProj4(geoKeys).proj4;
+        if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
+        const toSource = proj4("EPSG:3857", srcDef); // forward: mercator -> source
+        const toLonLat = proj4(srcDef, "EPSG:4326"); // forward: source -> lon/lat
+        const palette = buildPalette((await tiff.getImage()).fileDirectory.ColorMap);
+
+        // fitBounds bounds: transform the source corners to lon/lat.
+        const fw = levels[0].width, fh = levels[0].height;
+        const corners = [
+          [gt[0], gt[3]],
+          [gt[0] + fw * gt[1], gt[3]],
+          [gt[0], gt[3] + fh * gt[5]],
+          [gt[0] + fw * gt[1], gt[3] + fh * gt[5]],
+        ].map((c) => toLonLat.forward(c));
+        const lons = corners.map((c) => c[0]), lats = corners.map((c) => c[1]);
+        const boundsLonLat = [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
+
+        return {
+          ...base, mode: "warp", tiler, toSource, palette, boundsLonLat,
+          crsLabel: "warped from " + (srcDef.match(/\+proj=\w+/) || ["custom CRS"])[0],
+        };
+      }
+
+      // Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks),
+      // or null if the band isn't paletted.
+      function buildPalette(colorMap) {
+        if (!colorMap) return null;
+        const n = colorMap.length / 3;
+        const pal = new Uint8ClampedArray(256 * 4);
+        for (let i = 0; i < 256 && i < n; i++) {
+          pal[i * 4] = colorMap[i] >> 8;
+          pal[i * 4 + 1] = colorMap[n + i] >> 8;
+          pal[i * 4 + 2] = colorMap[2 * n + i] >> 8;
+          pal[i * 4 + 3] = 255;
+        }
+        return pal;
       }
 
       // Fetch + decode one source tile, deduped and cached. Stores the promise
@@ -172,33 +231,152 @@
       // MapLibre custom protocol: cog://{z}/{x}/{y}
       maplibregl.addProtocol("cog", async (params) => {
         if (!current) return { data: new Uint8Array() };
-        const { stream, tiler, levels } = current;
+        const cur = current;
         const m = params.url.match(/cog:\/\/(\d+)\/(\d+)\/(\d+)/);
         const [z, x, y] = m.slice(1).map(Number);
-
-        const win = tiler.pixel_window_for_tile(z, x, y);
-        if (win.empty) return { data: transparentPng() };
-
-        // Ask CogStream which COG tiles cover the window, fetch + decode them,
-        // and assemble a row-major f64 window.
-        const lv = levels[win.level];
-        const tiles = JSON.parse(
-          stream.tiles_for_window(win.level, win.x, win.y, win.w, win.h),
-        );
-        // Fetch + decode all covering tiles in parallel (cached/deduped), then
-        // assemble them into a row-major f64 window.
-        const decoded = await Promise.all(
-          tiles.map((t) => getTile(current, win.level, t)),
-        );
-        const window = new Float64Array(win.w * win.h);
-        tiles.forEach((t, i) => blit(decoded[i], t, win, lv, window));
-
-        const min = +document.getElementById("min").value;
-        const max = +document.getElementById("max").value;
-        const cmap = document.getElementById("cmap").value;
-        const rgba = tiler.render(window, win.w, win.h, min, max, cmap, true);
-        return { data: await rgbaToPng(rgba) };
+        try {
+          const rgba =
+            cur.mode === "warp"
+              ? await warpTile(cur, z, x, y)
+              : await renderTile3857(cur, z, x, y);
+          return rgba ? { data: await rgbaToPng(rgba) } : { data: transparentPng() };
+        } catch (e) {
+          console.error("cog tile", z, x, y, e);
+          return { data: transparentPng() };
+        }
       });
+
+      function readUI() {
+        return {
+          min: +document.getElementById("min").value,
+          max: +document.getElementById("max").value,
+          cmap: document.getElementById("cmap").value,
+        };
+      }
+
+      // Fetch + decode (parallel, cached) the source tiles covering a level
+      // pixel window and assemble them into a row-major f64 buffer (NaN = no data).
+      async function assembleWindow(cur, level, x, y, w, h) {
+        const lv = cur.levels[level];
+        const tiles = JSON.parse(cur.stream.tiles_for_window(level, x, y, w, h));
+        const decoded = await Promise.all(tiles.map((t) => getTile(cur, level, t)));
+        const buf = new Float64Array(w * h).fill(NaN);
+        const win = { x, y, w, h };
+        tiles.forEach((t, i) => blit(decoded[i], t, win, lv, buf));
+        return buf;
+      }
+
+      // Fast path: source already EPSG:3857, so a tile maps affinely to a window.
+      async function renderTile3857(cur, z, x, y) {
+        const win = cur.tiler.pixel_window_for_tile(z, x, y);
+        if (win.empty) return null;
+        const buf = await assembleWindow(cur, win.level, win.x, win.y, win.w, win.h);
+        const { min, max, cmap } = readUI();
+        return cur.tiler.render(buf, win.w, win.h, min, max, cmap, true);
+      }
+
+      // Choose the overview whose source resolution is the coarsest still finer
+      // than `srcRes` (meters/px), avoiding upsampling; finest level otherwise.
+      function chooseLevel(cur, srcRes) {
+        const base = Math.abs(cur.gt[1]), fw = cur.levels[0].width;
+        let best = -1, bestRes = 0, finest = 0, finestRes = Infinity;
+        cur.levels.forEach((lv, i) => {
+          const res = base * (fw / lv.width);
+          if (res < finestRes) { finestRes = res; finest = i; }
+          if (res <= srcRes && res > bestRes) { best = i; bestRes = res; }
+        });
+        return best >= 0 ? best : finest;
+      }
+
+      function levelPixelSize(cur, level) {
+        const lv = cur.levels[level], L0 = cur.levels[0];
+        return [
+          Math.abs(cur.gt[1]) * (L0.width / lv.width),
+          Math.abs(cur.gt[5]) * (L0.height / lv.height),
+        ];
+      }
+
+      function bilin(v00, v10, v01, v11, tx, ty) {
+        if (!isFinite(v00) || !isFinite(v10) || !isFinite(v01) || !isFinite(v11)) {
+          return isFinite(v00) ? v00 : NaN; // near projection edges
+        }
+        const top = v00 + (v10 - v00) * tx, bot = v01 + (v11 - v01) * tx;
+        return top + (bot - top) * ty;
+      }
+
+      // Warp path: reproject a Web Mercator tile from the source CRS on the fly.
+      // A coarse grid of mercator->source samples (proj4) is bilinearly
+      // interpolated per output pixel, then nearest-sampled from the source
+      // window. Paletted sources use the color table; others reuse the Rust
+      // colormap (render resamples 256->256, ~identity).
+      const NG = 16; // warp grid cells per axis
+      async function warpTile(cur, z, x, y) {
+        const tb = tileBounds3857(z, x, y);
+        const nx = new Float64Array((NG + 1) * (NG + 1));
+        const ny = new Float64Array((NG + 1) * (NG + 1));
+        let sminx = Infinity, sminy = Infinity, smaxx = -Infinity, smaxy = -Infinity, any = false;
+        for (let gy = 0; gy <= NG; gy++) {
+          const my = tb[3] - (gy / NG) * (tb[3] - tb[1]);
+          for (let gx = 0; gx <= NG; gx++) {
+            const mx = tb[0] + (gx / NG) * (tb[2] - tb[0]);
+            let s;
+            try { s = cur.toSource.forward([mx, my]); } catch { s = [NaN, NaN]; }
+            const i = gy * (NG + 1) + gx;
+            nx[i] = s[0]; ny[i] = s[1];
+            if (isFinite(s[0]) && isFinite(s[1])) {
+              any = true;
+              if (s[0] < sminx) sminx = s[0];
+              if (s[0] > smaxx) smaxx = s[0];
+              if (s[1] < sminy) sminy = s[1];
+              if (s[1] > smaxy) smaxy = s[1];
+            }
+          }
+        }
+        if (!any) return null;
+
+        const level = chooseLevel(cur, (smaxx - sminx) / 256);
+        const lv = cur.levels[level];
+        const [lpw, lph] = levelPixelSize(cur, level);
+        const ox = cur.gt[0], oy = cur.gt[3];
+        let c0 = Math.floor((sminx - ox) / lpw), c1 = Math.ceil((smaxx - ox) / lpw);
+        let r0 = Math.floor((oy - smaxy) / lph), r1 = Math.ceil((oy - sminy) / lph);
+        c0 = Math.max(0, Math.min(c0, lv.width)); c1 = Math.max(0, Math.min(c1, lv.width));
+        r0 = Math.max(0, Math.min(r0, lv.height)); r1 = Math.max(0, Math.min(r1, lv.height));
+        const ww = c1 - c0, hh = r1 - r0;
+        if (ww <= 0 || hh <= 0) return null;
+        const buf = await assembleWindow(cur, level, c0, r0, ww, hh);
+
+        const pal = cur.palette;
+        const ui = pal ? null : readUI();
+        const out = new Uint8ClampedArray(256 * 256 * 4);
+        const grid = pal ? null : new Float64Array(256 * 256).fill(NaN);
+        for (let py = 0; py < 256; py++) {
+          const fy = (py / 256) * NG, gy0 = Math.min(NG - 1, Math.floor(fy)), ty = fy - gy0;
+          for (let px = 0; px < 256; px++) {
+            const fx = (px / 256) * NG, gx0 = Math.min(NG - 1, Math.floor(fx)), tx = fx - gx0;
+            const i00 = gy0 * (NG + 1) + gx0;
+            const sx = bilin(nx[i00], nx[i00 + 1], nx[i00 + NG + 1], nx[i00 + NG + 2], tx, ty);
+            const sy = bilin(ny[i00], ny[i00 + 1], ny[i00 + NG + 1], ny[i00 + NG + 2], tx, ty);
+            if (!isFinite(sx) || !isFinite(sy)) continue;
+            const col = Math.floor((sx - ox) / lpw) - c0;
+            const row = Math.floor((oy - sy) / lph) - r0;
+            if (col < 0 || col >= ww || row < 0 || row >= hh) continue;
+            const v = buf[row * ww + col];
+            if (!isFinite(v)) continue;
+            if (pal) {
+              const ci = v & 255;
+              if (ci === 0 || (cur.nodata != null && v === cur.nodata)) continue;
+              const o = (py * 256 + px) * 4;
+              out[o] = pal[ci * 4]; out[o + 1] = pal[ci * 4 + 1];
+              out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = 255;
+            } else {
+              grid[py * 256 + px] = v;
+            }
+          }
+        }
+        if (pal) return out;
+        return cur.tiler.render(grid, 256, 256, ui.min, ui.max, ui.cmap, true);
+      }
 
       async function load() {
         const url = document.getElementById("url").value.trim();
@@ -206,7 +384,10 @@
         status("opening COG…");
         try {
           current = await openCog(url);
-          status(`EPSG:${current.tiler.epsg}, ${current.tiler.num_levels} levels`);
+          status(
+            `${current.crsLabel}, ${current.levels.length} levels` +
+              (current.palette ? " (palette)" : ""),
+          );
           if (map.getLayer("cog")) map.removeLayer("cog");
           if (map.getSource("cog")) map.removeSource("cog");
           map.addSource("cog", {
@@ -215,9 +396,9 @@
             tileSize: 256,
           });
           map.addLayer({ id: "cog", type: "raster", source: "cog" });
-          // Zoom to the data: bounds_lonlat() -> [minlon,minlat,maxlon,maxlat].
-          const b = Array.from(current.stream.bounds_lonlat());
-          if (b.length === 4) {
+          // Zoom to the data: boundsLonLat = [minlon,minlat,maxlon,maxlat].
+          const b = current.boundsLonLat;
+          if (b && b.length === 4 && b.every(Number.isFinite)) {
             map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 20, duration: 0 });
           }
         } catch (e) {
