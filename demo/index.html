@@ -153,7 +153,12 @@
         if (!p) {
           p = cur
             .range(t.offset, t.offset + t.length - 1)
-            .then((bytes) => cur.stream.decode_tile_f64(level, bytes));
+            .then((bytes) => cur.stream.decode_tile_f64(level, bytes))
+            .catch((err) => {
+              // Don't cache failures, so a transient error can be retried.
+              cur.tileCache.delete(key);
+              throw err;
+            });
           cur.tileCache.set(key, p);
           if (cur.tileCache.size > MAX_CACHED_TILES) {
             cur.tileCache.delete(cur.tileCache.keys().next().value); // evict oldest
