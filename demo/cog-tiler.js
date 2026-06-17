@@ -340,7 +340,8 @@ export async function rgbaToPng(rgba) {
  * `source` is a {@link CogSource} and `render` is `{ min, max, colormap }`.
  */
 export function registerCogProtocol(maplibregl, name, resolve) {
-  const re = new RegExp(`${name}://(\\d+)/(\\d+)/(\\d+)`);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // literal protocol name
+  const re = new RegExp(`${escaped}://(\\d+)/(\\d+)/(\\d+)`);
   maplibregl.addProtocol(name, async (params) => {
     const ctx = resolve();
     if (!ctx || !ctx.source) return { data: new Uint8Array() };

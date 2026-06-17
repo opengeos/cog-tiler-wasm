@@ -79,11 +79,15 @@
       await init();
 
       const status = (m) => (document.getElementById("status").textContent = m);
-      const readRender = () => ({
-        min: +document.getElementById("min").value,
-        max: +document.getElementById("max").value,
-        colormap: document.getElementById("cmap").value,
-      });
+      const num = (id, fallback) => {
+        const v = Number(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : fallback;
+      };
+      const readRender = () => {
+        let min = num("min", 0), max = num("max", 1);
+        if (min >= max) max = min + 1; // avoid a zero/negative rescale range
+        return { min, max, colormap: document.getElementById("cmap").value };
+      };
 
       const map = new maplibregl.Map({
         container: "map",
