@@ -66,21 +66,26 @@ const range = (a, b) =>
 
 // 1. Open the COG header with whitebox-wasm's streamer.
 const stream = new CogStream(await range(0, 65535));
-const levels = JSON.parse(stream.levels_json()); // [{width,height}, ...] finest first
+// levels: [{level,width,height,tile_width,tile_height,tiles_x,tiles_y,bands,
+//           bits_per_sample,sample_format,compression}, ...] finest first
+const levels = JSON.parse(stream.levels_json());
 
-// 2. Build the tiler from the COG metadata.
+// 2. Build the tiler from the COG metadata. CogStream's epsg/nodata getters are
+//    Option-typed: a number or `undefined` (not NaN), so pass them straight through.
 const tiler = new CogTiler(
-  Float64Array.from(stream.geo_transform()),
+  Float64Array.from(stream.geo_transform()), // [x0, px_w, rot, y0, rot, px_h]
   levels[0].width,
   levels[0].height,
   stream.epsg, // must be 3857 in v1
-  Number.isNaN(stream.nodata) ? undefined : stream.nodata,
+  stream.nodata, // undefined => no nodata
   JSON.stringify(levels),
 );
 
 // 3. Per XYZ tile: window -> fetch+decode -> render.
 const win = tiler.pixel_window_for_tile(z, x, y);
-// (use stream.tiles_for_window / decode_tile_f64 to assemble a w*h Float64Array)
+// tiles_for_window returns [{col,row,offset,length}]; the tile's pixel origin is
+// (col*tile_width, row*tile_height) and decode_tile_f64 is pixel-interleaved.
+// See demo/index.html `blit()` for the full window-assembly loop.
 const rgba = tiler.render(window, win.w, win.h, 0, 3000, "viridis", true);
 ```
 
@@ -96,7 +101,8 @@ A runnable MapLibre example (custom `cog://` protocol) is in
 - `width`/`height` - full-resolution pixel dimensions
 - `epsg` - source CRS; must be `3857` in v1
 - `nodata` - optional nodata value (`undefined`/`NaN` = none)
-- `levels_json` - JSON array of `{width,height}`, finest level first
+- `levels_json` - JSON array of level descriptors, finest level first; only
+  `width`/`height` are read (extra `whitebox-wasm` fields are ignored)
 
 Properties: `epsg`, `num_levels`.
 
