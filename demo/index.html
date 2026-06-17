@@ -8,6 +8,18 @@
       href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"
       rel="stylesheet"
     />
+    <!-- Resolve the cog-tiler.js peer dependencies to a CDN for this no-build
+         demo. In a bundled app these are normal npm peer dependencies. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "whitebox-wasm": "https://esm.sh/whitebox-wasm@0.4.0",
+          "proj4": "https://esm.sh/proj4@2.20.9",
+          "geotiff": "https://esm.sh/geotiff@2.1.3",
+          "geotiff-geokeys-to-proj4": "https://esm.sh/geotiff-geokeys-to-proj4@2024.4.13"
+        }
+      }
+    </script>
     <style>
       html,
       body,
@@ -35,7 +47,7 @@
   <body>
     <div id="panel">
       <strong>cog-tiler-wasm</strong> — serverless COG tiling<br />
-      <small>EPSG:3857 COG URL:</small>
+      <small>COG URL (EPSG:3857, or any projected/4326 - warped on the fly):</small>
       <input id="url" value="./sample-3857-cog.tif" placeholder="https://.../cog-3857.tif" />
       <div>
         rescale
@@ -59,19 +71,23 @@
 
     <script type="module">
       import maplibregl from "https://esm.sh/maplibre-gl@5.24.0";
+      // All COG tiling/warping/palette logic lives in the reusable module so
+      // downstream apps can import it directly instead of copying this page.
+      // `?v=__BUILD__` is rewritten to the commit SHA on deploy for cache-busting.
+      import { init, openCog, registerCogProtocol } from "./cog-tiler.js?v=__BUILD__";
 
-      // The decode engine (pure-Rust COG codecs + remote range reads).
-      import initWhitebox, {
-        CogStream,
-      } from "https://esm.sh/whitebox-wasm@0.4.0";
-      // The tiling brain (this crate). The Pages workflow builds the wasm
-      // package next to this file; `?v=__BUILD__` is rewritten to the commit SHA
-      // on deploy so a fresh module never pairs with a stale cached loader.
-      import initTiler, { CogTiler } from "./cog_tiler_wasm.js?v=__BUILD__";
-
-      await Promise.all([initWhitebox(), initTiler()]);
+      await init();
 
       const status = (m) => (document.getElementById("status").textContent = m);
+      const num = (id, fallback) => {
+        const v = Number(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : fallback;
+      };
+      const readRender = () => {
+        let min = num("min", 0), max = num("max", 1);
+        if (min >= max) max = min + 1; // avoid a zero/negative rescale range
+        return { min, max, colormap: document.getElementById("cmap").value };
+      };
 
       const map = new maplibregl.Map({
         container: "map",
@@ -80,9 +96,7 @@
           sources: {
             osm: {
               type: "raster",
-              tiles: [
-                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-              ],
+              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
               tileSize: 256,
               attribution: "© OpenStreetMap",
             },
@@ -93,112 +107,12 @@
         zoom: 2,
       });
 
-      // One range-fetch helper per source URL.
-      const rangeFetcher = (url) => (a, b) =>
-        fetch(url, { headers: { Range: `bytes=${a}-${b}` } })
-          .then((r) => r.arrayBuffer())
-          .then((b) => new Uint8Array(b));
-
-      // Build a {stream, tiler, levels} bundle for a COG URL.
-      async function openCog(url) {
-        const range = rangeFetcher(url);
-        // Parse the COG header. Large COGs (many overviews / huge tile-offset
-        // arrays) have headers bigger than 64 KB, so grow the prefix and retry.
-        let stream;
-        for (let len = 65536; ; len *= 8) {
-          try {
-            stream = new CogStream(await range(0, len - 1));
-            break;
-          } catch (e) {
-            if (len >= 1 << 25) throw e; // give up past ~32 MB
-          }
-        }
-        const gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
-        // levels: [{level,width,height,tile_width,tile_height,tiles_x,tiles_y,
-        //           bands,bits_per_sample,sample_format,compression}, ...]
-        const levels = JSON.parse(stream.levels_json());
-        if (!Array.isArray(levels) || levels.length === 0) {
-          throw new Error("levels_json() returned no levels");
-        }
-        // v1 supports EPSG:3857 only. Reject other CRSs up front with a clear
-        // message instead of failing silently per-tile inside the protocol
-        // handler (e.g. NLCD is Albers, so the map would just stay blank).
-        if (stream.epsg !== 3857) {
-          const crs = stream.epsg ? "EPSG:" + stream.epsg : "non-3857 / unknown";
-          throw new Error(
-            `source CRS is ${crs}; this demo (v1) renders EPSG:3857 only - reproject the COG to 3857 first`,
-          );
-        }
-        // CogStream getters are Option -> a number or `undefined` (not NaN).
-        const tiler = new CogTiler(
-          Float64Array.from(gt),
-          levels[0].width,
-          levels[0].height,
-          stream.epsg, // must be 3857 in v1
-          stream.nodata, // undefined => no nodata
-          JSON.stringify(levels),
-        );
-        // tileCache: decoded source tiles keyed by "level/col/row". Caching the
-        // decode (not just the bytes) means panning/zooming reuses overlapping
-        // source tiles instead of re-fetching and re-decoding them.
-        return { stream, tiler, range, levels, tileCache: new Map() };
-      }
-
-      // Fetch + decode one source tile, deduped and cached. Stores the promise
-      // so concurrent map tiles needing the same source tile share one request.
-      const MAX_CACHED_TILES = 256; // ~0.5 MB each at 256x256 f64
-      function getTile(cur, level, t) {
-        const key = level + "/" + t.col + "/" + t.row;
-        let p = cur.tileCache.get(key);
-        if (!p) {
-          p = cur
-            .range(t.offset, t.offset + t.length - 1)
-            .then((bytes) => cur.stream.decode_tile_f64(level, bytes))
-            .catch((err) => {
-              // Don't cache failures, so a transient error can be retried.
-              cur.tileCache.delete(key);
-              throw err;
-            });
-          cur.tileCache.set(key, p);
-          if (cur.tileCache.size > MAX_CACHED_TILES) {
-            cur.tileCache.delete(cur.tileCache.keys().next().value); // evict oldest
-          }
-        }
-        return p;
-      }
-
       let current = null;
-
-      // MapLibre custom protocol: cog://{z}/{x}/{y}
-      maplibregl.addProtocol("cog", async (params) => {
-        if (!current) return { data: new Uint8Array() };
-        const { stream, tiler, levels } = current;
-        const m = params.url.match(/cog:\/\/(\d+)\/(\d+)\/(\d+)/);
-        const [z, x, y] = m.slice(1).map(Number);
-
-        const win = tiler.pixel_window_for_tile(z, x, y);
-        if (win.empty) return { data: transparentPng() };
-
-        // Ask CogStream which COG tiles cover the window, fetch + decode them,
-        // and assemble a row-major f64 window.
-        const lv = levels[win.level];
-        const tiles = JSON.parse(
-          stream.tiles_for_window(win.level, win.x, win.y, win.w, win.h),
-        );
-        // Fetch + decode all covering tiles in parallel (cached/deduped), then
-        // assemble them into a row-major f64 window.
-        const decoded = await Promise.all(
-          tiles.map((t) => getTile(current, win.level, t)),
-        );
-        const window = new Float64Array(win.w * win.h);
-        tiles.forEach((t, i) => blit(decoded[i], t, win, lv, window));
-
-        const min = +document.getElementById("min").value;
-        const max = +document.getElementById("max").value;
-        const cmap = document.getElementById("cmap").value;
-        const rgba = tiler.render(window, win.w, win.h, min, max, cmap, true);
-        return { data: await rgbaToPng(rgba) };
-      });
+      // The protocol resolves the active source + current render settings per tile.
+      registerCogProtocol(maplibregl, "cog", () => ({
+        source: current,
+        render: readRender(),
+      }));
 
       async function load() {
         const url = document.getElementById("url").value.trim();
@@ -206,7 +120,10 @@
         status("opening COG…");
         try {
           current = await openCog(url);
-          status(`EPSG:${current.tiler.epsg}, ${current.tiler.num_levels} levels`);
+          status(
+            `${current.crsLabel}, ${current.levels.length} levels` +
+              (current.hasPalette ? " (palette)" : ""),
+          );
           if (map.getLayer("cog")) map.removeLayer("cog");
           if (map.getSource("cog")) map.removeSource("cog");
           map.addSource("cog", {
@@ -215,9 +132,9 @@
             tileSize: 256,
           });
           map.addLayer({ id: "cog", type: "raster", source: "cog" });
-          // Zoom to the data: bounds_lonlat() -> [minlon,minlat,maxlon,maxlat].
-          const b = Array.from(current.stream.bounds_lonlat());
-          if (b.length === 4) {
+          // Zoom to the data: boundsLonLat = [minlon,minlat,maxlon,maxlat].
+          const b = current.boundsLonLat;
+          if (b && b.length === 4 && b.every(Number.isFinite)) {
             map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 20, duration: 0 });
           }
         } catch (e) {
@@ -230,48 +147,6 @@
       if (document.getElementById("url").value.trim()) {
         if (map.loaded()) load();
         else map.on("load", load);
-      }
-
-      // --- small helpers --------------------------------------------------
-
-      // Place a decoded COG tile into the assembled window buffer.
-      // CogStream.tiles_for_window records are { col, row, offset, length } - the
-      // tile's pixel origin in the level is (col*tile_width, row*tile_height),
-      // and decode_tile_f64 returns a full tile_width*tile_height*bands buffer,
-      // pixel-interleaved (stride by `bands` for band 0). Edge tiles come back
-      // full-size; the bounds checks clip them. (Shapes pinned against a real
-      // EPSG:3857 COG, whitebox-wasm 0.4.0.)
-      function blit(tilePx, t, win, lv, out) {
-        const tw = lv.tile_width;
-        const th = lv.tile_height;
-        const bands = lv.bands;
-        const tx0 = t.col * tw;
-        const ty0 = t.row * th;
-        for (let ry = 0; ry < th; ry++) {
-          const oy = ty0 + ry - win.y;
-          if (oy < 0 || oy >= win.h) continue;
-          for (let rx = 0; rx < tw; rx++) {
-            const ox = tx0 + rx - win.x;
-            if (ox < 0 || ox >= win.w) continue;
-            out[oy * win.w + ox] = tilePx[(ry * tw + rx) * bands]; // band 0
-          }
-        }
-      }
-
-      async function rgbaToPng(rgba) {
-        const img = new ImageData(new Uint8ClampedArray(rgba), 256, 256);
-        const cv = new OffscreenCanvas(256, 256);
-        cv.getContext("2d").putImageData(img, 0, 0);
-        const blob = await cv.convertToBlob({ type: "image/png" });
-        return new Uint8Array(await blob.arrayBuffer());
-      }
-
-      let _blank;
-      function transparentPng() {
-        if (_blank) return _blank;
-        const cv = new OffscreenCanvas(256, 256);
-        // a 1x1 transparent canvas scaled is fine; keep it simple
-        return (_blank = new Uint8Array());
       }
     </script>
   </body>

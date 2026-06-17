@@ -72,42 +72,59 @@ python3 -m http.server -d demo 8000   # then open http://localhost:8000/
 The published [GitHub Pages demo](https://opengeos.github.io/cog-tiler-wasm/) is
 built the same way by `.github/workflows/pages.yml`.
 
-## Usage
+## Usage (reusable module)
+
+[`cog-tiler.js`](demo/cog-tiler.js) is the downstream-facing module. It wraps the
+wasm tiler + `whitebox-wasm` and handles EPSG:3857 sources, on-the-fly **warping**
+of any projected/4326 COG to Web Mercator, and **paletted (categorical)**
+rendering - so apps import it instead of copying the demo. It must sit next to the
+built wasm package (`cog_tiler_wasm.js` + `_bg.wasm`).
+
+Peer dependencies (provide via your bundler, or an import map for a no-build page):
+`whitebox-wasm`, `proj4`, `geotiff`, `geotiff-geokeys-to-proj4`.
 
 ```js
-import initTiler, { CogTiler } from "cog-tiler-wasm";
-import initWhitebox, { CogStream } from "whitebox-wasm";
-await Promise.all([initTiler(), initWhitebox()]);
+import maplibregl from "maplibre-gl";
+import { init, openCog, registerCogProtocol } from "./cog-tiler.js";
 
-const range = (a, b) =>
-  fetch(url, { headers: { Range: `bytes=${a}-${b}` } })
-    .then((r) => r.arrayBuffer())
-    .then((b) => new Uint8Array(b));
+await init(); // load the wasm modules once
 
-// 1. Open the COG header with whitebox-wasm's streamer.
-const stream = new CogStream(await range(0, 65535));
-// levels: [{level,width,height,tile_width,tile_height,tiles_x,tiles_y,bands,
-//           bits_per_sample,sample_format,compression}, ...] finest first
-const levels = JSON.parse(stream.levels_json());
+let source = null;
+// The protocol resolves the active source + render settings per tile.
+registerCogProtocol(maplibregl, "cog", () => ({
+  source,
+  render: { min: 0, max: 3000, colormap: "viridis" }, // ignored for paletted COGs
+}));
 
-// 2. Build the tiler from the COG metadata. CogStream's epsg/nodata getters are
-//    Option-typed: a number or `undefined` (not NaN), so pass them straight through.
-const tiler = new CogTiler(
-  Float64Array.from(stream.geo_transform()), // [x0, px_w, rot, y0, rot, px_h]
-  levels[0].width,
-  levels[0].height,
-  stream.epsg, // must be 3857 in v1
-  stream.nodata, // undefined => no nodata
-  JSON.stringify(levels),
-);
+source = await openCog(url); // EPSG:3857 fast path, or warped if projected/4326
+map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
+map.addLayer({ id: "cog", type: "raster", source: "cog" });
 
-// 3. Per XYZ tile: window -> fetch+decode -> render.
-const win = tiler.pixel_window_for_tile(z, x, y);
-// tiles_for_window returns [{col,row,offset,length}]; the tile's pixel origin is
-// (col*tile_width, row*tile_height) and decode_tile_f64 is pixel-interleaved.
-// See demo/index.html `blit()` for the full window-assembly loop.
-const rgba = tiler.render(window, win.w, win.h, 0, 3000, "viridis", true);
+// source.crsLabel, source.levels, source.hasPalette, source.boundsLonLat
+// and source.renderTileRGBA(z, x, y, render) / renderTilePNG(...) are also exposed.
 ```
+
+For a no-build page, map the peer deps with an import map (see
+[`demo/index.html`](demo/index.html)):
+
+```html
+<script type="importmap">
+  { "imports": {
+    "whitebox-wasm": "https://esm.sh/whitebox-wasm@0.4.0",
+    "proj4": "https://esm.sh/proj4@2.20.9",
+    "geotiff": "https://esm.sh/geotiff@2.1.3",
+    "geotiff-geokeys-to-proj4": "https://esm.sh/geotiff-geokeys-to-proj4@2024.4.13"
+  } }
+</script>
+```
+
+### Low-level Rust API
+
+The wasm crate (`CogTiler`) is the 3857 tiling brain underneath `cog-tiler.js`:
+`pixel_window_for_tile(z, x, y)` maps a tile to a source-pixel window/overview,
+and `render(window, w, h, min, max, colormap, nodata_alpha)` rasterizes an
+assembled f64 window to RGBA. See [`demo/cog-tiler.js`](demo/cog-tiler.js) for the
+window-assembly and warp loops built on top.
 
 A runnable MapLibre example (custom `cog://` protocol) is in
 [`demo/index.html`](demo/index.html).
