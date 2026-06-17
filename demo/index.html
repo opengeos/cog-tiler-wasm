@@ -63,7 +63,7 @@
       // The decode engine (pure-Rust COG codecs + remote range reads).
       import initWhitebox, {
         CogStream,
-      } from "https://esm.sh/whitebox-wasm";
+      } from "https://esm.sh/whitebox-wasm@0.4.0";
       // The tiling brain (this crate).
       import initTiler, { CogTiler } from "../crates/cog-tiler-wasm/pkg/cog_tiler_wasm.js";
 
@@ -105,6 +105,9 @@
         // levels: [{level,width,height,tile_width,tile_height,tiles_x,tiles_y,
         //           bands,bits_per_sample,sample_format,compression}, ...]
         const levels = JSON.parse(stream.levels_json());
+        if (!Array.isArray(levels) || levels.length === 0) {
+          throw new Error("levels_json() returned no levels");
+        }
         // CogStream getters are Option -> a number or `undefined` (not NaN).
         const tiler = new CogTiler(
           Float64Array.from(gt),
