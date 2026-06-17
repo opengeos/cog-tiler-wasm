@@ -59,13 +59,13 @@ wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir pkg
 
 ### Run the demo locally
 
-The demo imports the wasm package as `./cog_tiler_wasm.js`, so build it into the
-`demo/` folder and serve that folder (any static server with HTTP range support
-works; the bundled sample is same-origin so no CORS is needed):
+The demo imports `./cog-tiler.js`, which imports `./cog_tiler_wasm.js`, so build
+the wasm and copy the module into `demo/`, then serve that folder (any static
+server with HTTP range support works; the bundled sample is same-origin, no CORS):
 
 ```bash
 wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir ../../demo
-cp examples/sample-3857-cog.tif demo/
+cp cog-tiler.js examples/sample-3857-cog.tif demo/
 python3 -m http.server -d demo 8000   # then open http://localhost:8000/
 ```
 
@@ -74,18 +74,22 @@ built the same way by `.github/workflows/pages.yml`.
 
 ## Usage (reusable module)
 
-[`cog-tiler.js`](demo/cog-tiler.js) is the downstream-facing module. It wraps the
-wasm tiler + `whitebox-wasm` and handles EPSG:3857 sources, on-the-fly **warping**
-of any projected/4326 COG to Web Mercator, and **paletted (categorical)**
-rendering - so apps import it instead of copying the demo. It must sit next to the
-built wasm package (`cog_tiler_wasm.js` + `_bg.wasm`).
+[`cog-tiler.js`](cog-tiler.js) is the package's main entry. It wraps the wasm
+tiler + `whitebox-wasm` and handles EPSG:3857 sources, on-the-fly **warping** of
+any projected/4326 COG to Web Mercator, and **paletted (categorical)** rendering -
+so apps import it instead of copying the demo.
 
-Peer dependencies (provide via your bundler, or an import map for a no-build page):
-`whitebox-wasm`, `proj4`, `geotiff`, `geotiff-geokeys-to-proj4`.
+It ships **inside the npm package** (`main`/`module` -> `cog-tiler.js`); the raw
+wasm tiler is also available at the `cog-tiler-wasm/wasm` subpath. Install it
+alongside its peer dependencies:
+
+```bash
+npm install cog-tiler-wasm whitebox-wasm proj4 geotiff geotiff-geokeys-to-proj4 maplibre-gl
+```
 
 ```js
 import maplibregl from "maplibre-gl";
-import { init, openCog, registerCogProtocol } from "./cog-tiler.js";
+import { init, openCog, registerCogProtocol } from "cog-tiler-wasm";
 
 await init(); // load the wasm modules once
 
@@ -123,7 +127,7 @@ For a no-build page, map the peer deps with an import map (see
 The wasm crate (`CogTiler`) is the 3857 tiling brain underneath `cog-tiler.js`:
 `pixel_window_for_tile(z, x, y)` maps a tile to a source-pixel window/overview,
 and `render(window, w, h, min, max, colormap, nodata_alpha)` rasterizes an
-assembled f64 window to RGBA. See [`demo/cog-tiler.js`](demo/cog-tiler.js) for the
+assembled f64 window to RGBA. See [`cog-tiler.js`](cog-tiler.js) for the
 window-assembly and warp loops built on top.
 
 A runnable MapLibre example (custom `cog://` protocol) is in
@@ -154,16 +158,31 @@ fully transparent.
 
 ## Roadmap
 
-- **Warping** non-3857 sources (resample with per-pixel coordinate transform,
-  using `whitebox-wasm`'s pure-Rust projection engine for the point transform).
+- **Warping** of projected/4326 sources and **paletted/categorical** rendering
+  are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). Next: expose
+  the source proj string + color table **upstream in `whitebox-wasm`** (it
+  already parses both) to drop the geotiff.js dependency, then move the warp into
+  the Rust crate (`proj4rs`).
 - **Multi-band / RGB** rendering and band-math expressions.
 - **More colormaps** and discrete/classified styling.
-- **Render in Rust vs JS** - benchmark and move hot paths into wasm.
 - **Edge / WASI serving** - run the same module as a serverless XYZ endpoint
   near the data, not only in the browser.
 - **STAC / mosaics** - multi-asset orchestration.
 
+## Releasing
+
+The npm package bundles the wasm tiler **and** the `cog-tiler.js` module
+(assembled by [`scripts/prepare-pkg.mjs`](scripts/prepare-pkg.mjs)). To cut a
+release, push a `vX.Y.Z` tag; [`release.yml`](.github/workflows/release.yml)
+builds, assembles, and publishes to npm via Trusted Publishing (OIDC, no token):
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+One-time setup: configure the package's Trusted Publisher on npmjs.com (package
+-> Settings -> Trusted Publisher) to this repo + `release.yml`.
+
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
-option.
+[MIT](LICENSE) © OpenGeos.

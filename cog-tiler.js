@@ -21,7 +21,7 @@
  *   map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
  */
 import initWhitebox, { CogStream } from "whitebox-wasm";
-import initTiler, { CogTiler } from "./cog_tiler_wasm.js?v=__BUILD__";
+import initTiler, { CogTiler } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";

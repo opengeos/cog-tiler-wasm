@@ -1,0 +1,47 @@
+name: Release
+
+# Publishes cog-tiler-wasm to npm on a version tag (e.g. v0.2.0).
+# Uses npm Trusted Publishing (OIDC) - no token. The npm package's trusted
+# publisher must be configured to this repo + workflow first (one-time setup
+# at npmjs.com -> package -> Settings -> Trusted Publisher).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # attach the .wasm to the GitHub Release
+  id-token: write # npm Trusted Publishing (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
+
+      - name: Build the wasm package
+        run: wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir pkg
+      - name: Assemble package (bundle the JS module + exports + peer deps)
+        run: PKG_VERSION="${GITHUB_REF_NAME#v}" node scripts/prepare-pkg.mjs crates/cog-tiler-wasm/pkg
+
+      - name: Publish to npm (Trusted Publishing, with provenance)
+        run: npm publish --provenance --access public
+        working-directory: crates/cog-tiler-wasm/pkg
+
+      - name: Attach the raw wasm to the GitHub Release
+        run: gh release upload "$GITHUB_REF_NAME" crates/cog-tiler-wasm/pkg/cog_tiler_wasm_bg.wasm --clobber
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
