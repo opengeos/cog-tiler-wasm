@@ -1,0 +1,52 @@
+name: Deploy demo to Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build the demo site
+        run: |
+          # Build the wasm package straight into the site root, next to index.html
+          wasm-pack build crates/cog-tiler-wasm --release --target web \
+            --out-dir "$GITHUB_WORKSPACE/site"
+          cp demo/index.html site/index.html
+          cp examples/sample-3857-cog.tif site/sample-3857-cog.tif
+          rm -f site/.gitignore
+          # Cache-bust the loader + wasm together so returning visitors never
+          # pair a freshly built module with a stale cached glue file.
+          sed -i "s/__BUILD__/${GITHUB_SHA}/g" site/index.html
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,10 +1,15 @@
 # cog-tiler-wasm
 
 [![CI](https://github.com/opengeos/cog-tiler-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/opengeos/cog-tiler-wasm/actions/workflows/ci.yml)
+[![Live demo](https://img.shields.io/badge/demo-GitHub%20Pages-blue)](https://opengeos.github.io/cog-tiler-wasm/)
 
 **Serverless, TiTiler-style XYZ tiling of Cloud Optimized GeoTIFFs, in
 WebAssembly.** No backend, no GDAL, no PROJ - the map fetches COG byte ranges
 directly and synthesizes `z/x/y` tiles client-side.
+
+**[Live demo](https://opengeos.github.io/cog-tiler-wasm/)** - loads a sample
+EPSG:3857 COG over HTTP range requests and renders it on a MapLibre map, all in
+the browser. Paste any CORS- and range-enabled 3857 COG URL to try your own.
 
 This crate is the **tiling brain**. It does the slippy-map math (tile -> source
 pixel window), picks the right COG overview level, and renders a decoded window
@@ -51,6 +56,21 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir pkg
 ```
+
+### Run the demo locally
+
+The demo imports the wasm package as `./cog_tiler_wasm.js`, so build it into the
+`demo/` folder and serve that folder (any static server with HTTP range support
+works; the bundled sample is same-origin so no CORS is needed):
+
+```bash
+wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir ../../demo
+cp examples/sample-3857-cog.tif demo/
+python3 -m http.server -d demo 8000   # then open http://localhost:8000/
+```
+
+The published [GitHub Pages demo](https://opengeos.github.io/cog-tiler-wasm/) is
+built the same way by `.github/workflows/pages.yml`.
 
 ## Usage
 
