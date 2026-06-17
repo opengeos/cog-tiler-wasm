@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cog-tiler-wasm demo</title>
+    <link
+      href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <style>
+      html,
+      body,
+      #map {
+        margin: 0;
+        height: 100%;
+      }
+      #panel {
+        position: absolute;
+        z-index: 1;
+        top: 10px;
+        left: 10px;
+        background: #fff;
+        padding: 10px 12px;
+        border-radius: 6px;
+        font: 13px system-ui, sans-serif;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        max-width: 320px;
+      }
+      #panel input {
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <strong>cog-tiler-wasm</strong> — serverless COG tiling<br />
+      <small>EPSG:3857 COG URL:</small>
+      <input id="url" value="" placeholder="https://.../cog-3857.tif" />
+      <div>
+        rescale
+        <input
+          id="min"
+          type="number"
+          value="0"
+          style="width: 70px"
+        />–<input id="max" type="number" value="3000" style="width: 70px" />
+        <select id="cmap">
+          <option>viridis</option>
+          <option>magma</option>
+          <option>terrain</option>
+          <option>gray</option>
+        </select>
+        <button id="load">Load</button>
+      </div>
+      <small id="status"></small>
+    </div>
+    <div id="map"></div>
+
+    <script type="module">
+      import maplibregl from "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js?module";
+
+      // The decode engine (pure-Rust COG codecs + remote range reads).
+      import initWhitebox, {
+        CogStream,
+      } from "https://esm.sh/whitebox-wasm";
+      // The tiling brain (this crate).
+      import initTiler, { CogTiler } from "../crates/cog-tiler-wasm/pkg/cog_tiler_wasm.js";
+
+      await Promise.all([initWhitebox(), initTiler()]);
+
+      const status = (m) => (document.getElementById("status").textContent = m);
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: "raster",
+              tiles: [
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+              ],
+              tileSize: 256,
+              attribution: "© OpenStreetMap",
+            },
+          },
+          layers: [{ id: "osm", type: "raster", source: "osm" }],
+        },
+        center: [0, 0],
+        zoom: 2,
+      });
+
+      // One range-fetch helper per source URL.
+      const rangeFetcher = (url) => (a, b) =>
+        fetch(url, { headers: { Range: `bytes=${a}-${b}` } })
+          .then((r) => r.arrayBuffer())
+          .then((b) => new Uint8Array(b));
+
+      // Build a {stream, tiler} pair for a COG URL.
+      async function openCog(url) {
+        const range = rangeFetcher(url);
+        const stream = new CogStream(await range(0, 65535)); // header only
+        const gt = stream.geo_transform();
+        const levels = JSON.parse(stream.levels_json()); // [{width,height},...]
+        const epsg = stream.epsg;
+        const nodata = stream.nodata; // NaN if none
+        // CogTiler wants full-res width/height = level 0 dims.
+        const tiler = new CogTiler(
+          Float64Array.from(gt),
+          levels[0].width,
+          levels[0].height,
+          epsg,
+          Number.isNaN(nodata) ? undefined : nodata,
+          JSON.stringify(levels),
+        );
+        return { stream, tiler, range };
+      }
+
+      let current = null;
+
+      // MapLibre custom protocol: cog://{z}/{x}/{y}
+      maplibregl.addProtocol("cog", async (params) => {
+        if (!current) return { data: new Uint8Array() };
+        const { stream, tiler, range } = current;
+        const m = params.url.match(/cog:\/\/(\d+)\/(\d+)\/(\d+)/);
+        const [z, x, y] = m.slice(1).map(Number);
+
+        const win = tiler.pixel_window_for_tile(z, x, y);
+        if (win.empty) return { data: transparentPng() };
+
+        // Ask CogStream which COG tiles cover the window, fetch + decode them,
+        // and assemble a row-major f64 window.
+        const tiles = JSON.parse(
+          stream.tiles_for_window(win.level, win.x, win.y, win.w, win.h),
+        );
+        const window = new Float64Array(win.w * win.h);
+        for (const t of tiles) {
+          const bytes = await range(t.offset, t.offset + t.length - 1);
+          const px = stream.decode_tile_f64(win.level, bytes); // tile-sized f64
+          blit(px, t, win, window); // place tile into the window (see helper)
+        }
+
+        const min = +document.getElementById("min").value;
+        const max = +document.getElementById("max").value;
+        const cmap = document.getElementById("cmap").value;
+        const rgba = tiler.render(window, win.w, win.h, min, max, cmap, true);
+        return { data: await rgbaToPng(rgba) };
+      });
+
+      document.getElementById("load").onclick = async () => {
+        const url = document.getElementById("url").value.trim();
+        if (!url) return;
+        status("opening COG…");
+        try {
+          current = await openCog(url);
+          status(`EPSG:${current.tiler.epsg}, ${current.tiler.num_levels} levels`);
+          if (map.getLayer("cog")) map.removeLayer("cog");
+          if (map.getSource("cog")) map.removeSource("cog");
+          map.addSource("cog", {
+            type: "raster",
+            tiles: ["cog://{z}/{x}/{y}"],
+            tileSize: 256,
+          });
+          map.addLayer({ id: "cog", type: "raster", source: "cog" });
+        } catch (e) {
+          status("error: " + e);
+        }
+      };
+
+      // --- small helpers --------------------------------------------------
+
+      // Place a decoded COG tile into the assembled window buffer. `t` carries
+      // the tile's pixel origin/size within the level (fields returned by
+      // CogStream.tiles_for_window); adjust field names to your CogStream build.
+      function blit(tilePx, t, win, out) {
+        const tw = t.width ?? t.tile_width;
+        const th = t.height ?? t.tile_height;
+        const tx0 = (t.x ?? t.col_off) - win.x;
+        const ty0 = (t.y ?? t.row_off) - win.y;
+        for (let ry = 0; ry < th; ry++) {
+          const oy = ty0 + ry;
+          if (oy < 0 || oy >= win.h) continue;
+          for (let rx = 0; rx < tw; rx++) {
+            const ox = tx0 + rx;
+            if (ox < 0 || ox >= win.w) continue;
+            out[oy * win.w + ox] = tilePx[ry * tw + rx];
+          }
+        }
+      }
+
+      async function rgbaToPng(rgba) {
+        const img = new ImageData(new Uint8ClampedArray(rgba), 256, 256);
+        const cv = new OffscreenCanvas(256, 256);
+        cv.getContext("2d").putImageData(img, 0, 0);
+        const blob = await cv.convertToBlob({ type: "image/png" });
+        return new Uint8Array(await blob.arrayBuffer());
+      }
+
+      let _blank;
+      function transparentPng() {
+        if (_blank) return _blank;
+        const cv = new OffscreenCanvas(256, 256);
+        // a 1x1 transparent canvas scaled is fine; keep it simple
+        return (_blank = new Uint8Array());
+      }
+    </script>
+  </body>
+</html>
