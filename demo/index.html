@@ -53,6 +53,11 @@
         <label for="file"><small>or open a local COG:</small></label>
         <input id="file" type="file" accept=".tif,.tiff,image/tiff" style="width: auto" />
       </div>
+      <div style="margin: 4px 0">
+        <label for="bands">bands</label>
+        <input id="bands" placeholder="auto, e.g. 1 or 4,1,2" style="width: 150px" />
+        <small>(1-based; 1 = colormap, 3 = RGB)</small>
+      </div>
       <div>
         rescale
         <input
@@ -109,9 +114,16 @@
       const readRender = () => {
         let min = num("min", 0), max = num("max", 1);
         if (min >= max) max = min + 1; // avoid a zero/negative rescale range
+        // bands: comma-separated 1-based indices; empty = auto.
+        const bidx = document
+          .getElementById("bands")
+          .value.split(",")
+          .map((s) => parseInt(s, 10))
+          .filter((n) => Number.isInteger(n) && n > 0);
         return {
           min,
           max,
+          bidx: bidx.length ? bidx : undefined,
           colormap: document.getElementById("cmap").value,
           reversed: document.getElementById("reversed").checked,
           stretch: document.getElementById("stretch").value,
@@ -193,7 +205,7 @@
         if (e.target.files[0]) load(e.target.files[0]);
       };
       // Changing any render control re-renders the raster through cog-tiler-wasm.
-      for (const id of ["min", "max", "cmap", "reversed", "stretch", "gamma", "opacity"]) {
+      for (const id of ["bands", "min", "max", "cmap", "reversed", "stretch", "gamma", "opacity"]) {
         const el = document.getElementById(id);
         el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", restyle);
       }
