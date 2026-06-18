@@ -79,9 +79,14 @@
 
       // Populate the colormap dropdown from the built-in list (default: terrain).
       const cmapSel = document.getElementById("cmap");
-      cmapSel.innerHTML = colormaps()
-        .map((c) => `<option${c === "terrain" ? " selected" : ""}>${c}</option>`)
-        .join("");
+      cmapSel.replaceChildren(
+        ...colormaps().map((c) => {
+          const opt = document.createElement("option");
+          opt.value = opt.textContent = c;
+          if (c === "terrain") opt.selected = true;
+          return opt;
+        }),
+      );
 
       const status = (m) => (document.getElementById("status").textContent = m);
       const num = (id, fallback) => {

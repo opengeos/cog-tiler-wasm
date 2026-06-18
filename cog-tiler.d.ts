@@ -120,7 +120,8 @@ export declare function init(): Promise<unknown>;
  */
 export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
 
-/** Encode a 256x256 RGBA buffer to PNG bytes (browser; uses OffscreenCanvas). */
+/** Encode an RGBA buffer to PNG bytes (browser; uses OffscreenCanvas).
+ *  Defaults to 256x256 when `width`/`height` are omitted. */
 export declare function rgbaToPng(
   rgba: Uint8Array | Uint8ClampedArray,
   width?: number,

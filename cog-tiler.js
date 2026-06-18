@@ -118,15 +118,24 @@ function mercExtentFromLonLat([w, s, e, n]) {
   return [minx, miny, maxx, maxy];
 }
 
-/** Output [w,h] honoring explicit width/height, else fitting `maxSize` to aspect. */
+/** Output [w,h] honoring explicit width/height, else fitting `maxSize` to aspect.
+ *  width/height/maxSize are user inputs, so validate them as positive integers
+ *  before they reach typed-array / canvas constructors. */
 function fitSize(extW, extH, maxSize, width, height) {
+  const posInt = (v, name) => {
+    if (v == null) return undefined;
+    const n = Math.floor(v);
+    if (!Number.isFinite(n) || n < 1) throw new Error(`${name} must be a positive integer`);
+    return n;
+  };
+  const w = posInt(width, "width"), h = posInt(height, "height"), max = posInt(maxSize, "maxSize") ?? 1024;
   const ar = extW / extH || 1;
-  if (width && height) return [width, height];
-  if (width) return [width, Math.max(1, Math.round(width / ar))];
-  if (height) return [Math.max(1, Math.round(height * ar)), height];
+  if (w && h) return [w, h];
+  if (w) return [w, Math.max(1, Math.round(w / ar))];
+  if (h) return [Math.max(1, Math.round(h * ar)), h];
   return ar >= 1
-    ? [maxSize, Math.max(1, Math.round(maxSize / ar))]
-    : [Math.max(1, Math.round(maxSize * ar)), maxSize];
+    ? [max, Math.max(1, Math.round(max / ar))]
+    : [Math.max(1, Math.round(max * ar)), max];
 }
 
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
@@ -431,7 +440,9 @@ export class CogSource {
           const v = bufs[0][row * ww + col];
           if (!isFinite(v)) continue;
           const ci = v & 255;
-          if (ci === 0 || (ndSet && v === nodata)) continue;
+          // Transparency: the declared nodata when present, else the GDAL
+          // paletted convention that index 0 is the background/no-data class.
+          if (ndSet ? v === nodata : ci === 0) continue;
           out[o] = pal[ci * 4]; out[o + 1] = pal[ci * 4 + 1];
           out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = 255;
         } else if (rgb) {
@@ -455,7 +466,11 @@ export class CogSource {
     }
     if (pal || rgb) return out;
     const [mn, mx] = rescales[0];
-    return colorize(grid, outW, outH, mn, mx, colormap, ndSet ? nodata : undefined, true);
+    // colorize returns a Uint8Array; expose a Uint8ClampedArray (zero-copy view,
+    // matching the palette/RGB branches and the RenderedImage type) so callers
+    // can pass it straight to ImageData.
+    const c = colorize(grid, outW, outH, mn, mx, colormap, ndSet ? nodata : undefined, true);
+    return new Uint8ClampedArray(c.buffer, c.byteOffset, c.length);
   }
 
   // --- TiTiler-style read API ----------------------------------------------
