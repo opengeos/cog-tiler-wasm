@@ -131,14 +131,25 @@ await src.bboxPNG([minLon, minLat, maxLon, maxLat]);   // /cog/bbox    -> PNG by
 await src.preview(opts);   // -> { width, height, rgba }  (bbox() likewise)
 
 // Render params (on tiles, preview, bbox):
-//   bidx:    1-based bands; one -> colormap/palette, three -> RGB composite
-//   rescale: [[min,max], ...] per band, or [min,max]; or min/max shorthand
+//   bidx:     1-based bands; one -> colormap/palette, three -> RGB composite
+//   rescale:  [[min,max], ...] per band, or [min,max]; or min/max shorthand
 //   colormap: one of colormaps()  (viridis, magma, plasma, inferno, cividis,
 //             turbo, terrain, blues, greens, reds, rdylgn, spectral, gray)
-//   nodata:  override the transparency value
+//   reversed: sample the colormap back-to-front (single-band)
+//   stretch:  transfer curve "linear" | "sqrt" | "log"  (applied after rescale)
+//   gamma:    power-law gamma (1 = off; applied after the stretch)
+//   nodata:   override the transparency value
+//   opacity:  output alpha multiplier 0..1
 await src.renderTilePNG(z, x, y, { bidx: [4, 3, 2], rescale: [0, 3000] }); // false-color RGB
 import { colormaps } from "cog-tiler-wasm";
 ```
+
+The render pipeline (nodata -> rescale -> stretch -> gamma -> colormap, plus
+reverse/opacity) matches the controls of GPU raster viewers such as
+[maplibre-gl-raster](https://github.com/opengeos/maplibre-gl-raster), so
+`cog-tiler-wasm` can serve as a CPU/WASM rendering backend for the same UI - the
+panel (band, rescale, colormap, curve, gamma, opacity) maps directly onto these
+params and re-renders by re-requesting tiles.
 
 Server-only endpoints (`/map.html`, `WMTSCapabilities.xml`, `/validate`,
 `/stac`) are out of scope for a client-side library; band-math `expression` is

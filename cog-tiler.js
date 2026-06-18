@@ -102,6 +102,15 @@ function computeStats(buf, nodata) {
   };
 }
 
+/** Transfer curve for a rescaled value in 0..1: stretch then gamma (mirrors the
+ *  Rust `transfer`; reversal is colormap-only so it's not applied to RGB). */
+function transferCurve(t, stretch, gamma) {
+  if (stretch === "sqrt") t = Math.sqrt(t);
+  else if (stretch === "log") t = Math.log(1 + 99 * t) / Math.log(100);
+  if (Math.abs(gamma - 1) > 1e-9) t = Math.pow(t, 1 / Math.max(gamma, 1e-4));
+  return t;
+}
+
 /** Normalize render rescale options to a list of [min,max] pairs (per band). */
 function rescaleList(opts) {
   if (Array.isArray(opts.rescale) && opts.rescale.length) {
@@ -380,6 +389,14 @@ export class CogSource {
     const colormap = opts.colormap || "viridis";
     const nodata = opts.nodata != null ? opts.nodata : this.nodata;
     const ndSet = nodata != null && !Number.isNaN(nodata);
+    // Transfer-curve params (parity with maplibre-gl-raster's shader pipeline).
+    // Normalize gamma/opacity here so the JS (RGB) and Rust (single-band) paths
+    // apply identical curves for the same options (e.g. gamma 0 -> clamped, not skipped).
+    const stretch = opts.stretch || "linear";
+    const gamma = Number.isFinite(+opts.gamma) ? Math.max(+opts.gamma, 1e-4) : 1;
+    const reversed = !!opts.reversed;
+    const opacity = Number.isFinite(+opts.opacity) ? Math.max(0, Math.min(1, +opts.opacity)) : 1;
+    const alpha = Math.round(opacity * 255);
 
     // Gridded mercator -> source samples, and the source-coord bbox they span.
     const nx = new Float64Array((NG + 1) * (NG + 1));
@@ -444,17 +461,18 @@ export class CogSource {
           // paletted convention that index 0 is the background/no-data class.
           if (ndSet ? v === nodata : ci === 0) continue;
           out[o] = pal[ci * 4]; out[o + 1] = pal[ci * 4 + 1];
-          out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = 255;
+          out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = alpha;
         } else if (rgb) {
-          // RGB composite: bilinear-sample each band, rescale to 0..255.
+          // RGB composite: bilinear-sample each band, rescale -> curve -> gamma.
           let ok = true;
           for (let k = 0; k < 3; k++) {
             const v = sampleWindowBilinear(bufs[k], ww, hh, fcol, frow);
             if (!isFinite(v) || (ndSet && v === nodata)) { ok = false; break; }
             const [mn, mx] = rescales[k] || rescales[0];
-            out[o + k] = Math.max(0, Math.min(255, ((v - mn) / ((mx - mn) || 1)) * 255));
+            const t = transferCurve(Math.max(0, Math.min(1, (v - mn) / ((mx - mn) || 1))), stretch, gamma);
+            out[o + k] = Math.round(t * 255);
           }
-          if (ok) out[o + 3] = 255;
+          if (ok) out[o + 3] = alpha;
           else { out[o] = out[o + 1] = out[o + 2] = 0; }
         } else {
           // Continuous single band: bilinear; colormap applied below.
@@ -469,7 +487,10 @@ export class CogSource {
     // colorize returns a Uint8Array; expose a Uint8ClampedArray (zero-copy view,
     // matching the palette/RGB branches and the RenderedImage type) so callers
     // can pass it straight to ImageData.
-    const c = colorize(grid, outW, outH, mn, mx, colormap, ndSet ? nodata : undefined, true);
+    const c = colorize(
+      grid, outW, outH, mn, mx, colormap, ndSet ? nodata : undefined, true,
+      stretch, gamma, reversed, opacity,
+    );
     return new Uint8ClampedArray(c.buffer, c.byteOffset, c.length);
   }
 

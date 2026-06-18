@@ -55,10 +55,32 @@ pub fn colormap_names() -> String {
     serde_json::to_string(colormap::NAMES).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Apply the rescaled value's transfer curve: stretch ("linear"|"sqrt"|"log"),
+/// then power-law gamma, then optional colormap reversal. Input/output in 0..1.
+/// Mirrors the maplibre-gl-raster shader order (rescale -> stretch -> gamma).
+fn transfer(mut t: f64, stretch: &str, gamma: f64, reversed: bool) -> f64 {
+    t = match stretch {
+        "sqrt" => t.sqrt(),
+        "log" => {
+            let k = 99.0; // maps 0->0, 1->1 with a log-ish lift of the low end
+            (1.0 + k * t).ln() / (1.0 + k).ln()
+        }
+        _ => t, // linear
+    };
+    if (gamma - 1.0).abs() > 1e-9 {
+        t = t.powf(1.0 / gamma.max(1e-4));
+    }
+    if reversed {
+        t = 1.0 - t;
+    }
+    t
+}
+
 /// Colormap a single-band `w*h` grid to RGBA at 1:1 (no resampling), for any
-/// output size. `NaN` (and the nodata value when `nodata_alpha`) become
-/// transparent. Pairs with the JS warp loop, which samples a grid at the output
-/// resolution; `render` (which always outputs 256x256) is the tile-only variant.
+/// output size, with rescale -> stretch -> gamma -> colormap (+ reverse) and a
+/// constant alpha from `opacity`. `NaN` (and the nodata value when
+/// `nodata_alpha`) become transparent. Pairs with the JS warp loop, which
+/// samples a grid at the output resolution.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn colorize(
@@ -70,23 +92,28 @@ pub fn colorize(
     colormap: &str,
     nodata: Option<f64>,
     nodata_alpha: bool,
+    stretch: &str,
+    gamma: f64,
+    reversed: bool,
+    opacity: f64,
 ) -> Vec<u8> {
     let n = (width as usize) * (height as usize);
     let mut out = vec![0u8; n * 4];
     let range = max - min;
     let inv = if range != 0.0 { 1.0 / range } else { 0.0 };
     let nd = nodata.filter(|v| !v.is_nan());
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
     for (chunk, &v) in out.chunks_exact_mut(4).zip(pixels.iter()) {
         let is_nd = matches!(nd, Some(x) if v == x || (v - x).abs() <= f64::EPSILON);
         if v.is_nan() || (is_nd && nodata_alpha) {
             continue; // transparent
         }
-        let t = ((v - min) * inv).clamp(0.0, 1.0);
+        let t = transfer(((v - min) * inv).clamp(0.0, 1.0), stretch, gamma, reversed);
         let [r, g, b] = colormap::lookup(colormap, t);
         chunk[0] = r;
         chunk[1] = g;
         chunk[2] = b;
-        chunk[3] = 255;
+        chunk[3] = alpha;
     }
     out
 }
