@@ -17,6 +17,15 @@ export interface RenderOptions {
   bidx?: number[];
   /** Override the source nodata value for transparency. */
   nodata?: number;
+  /** Transfer curve applied to the rescaled value before the colormap.
+   *  Default "linear". */
+  stretch?: "linear" | "sqrt" | "log";
+  /** Power-law gamma (1 = off). Applied after the stretch. */
+  gamma?: number;
+  /** Sample the colormap back-to-front (single-band). */
+  reversed?: boolean;
+  /** Output alpha multiplier in [0,1]. Default 1. */
+  opacity?: number;
 }
 
 /** A rendered image: row-major RGBA, `width * height * 4` bytes. */

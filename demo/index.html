@@ -62,6 +62,17 @@
           style="width: 70px"
         />–<input id="max" type="number" value="1600" style="width: 70px" />
         <select id="cmap"></select>
+        <label><input id="reversed" type="checkbox" style="width: auto" /> reverse</label>
+      </div>
+      <div style="margin: 4px 0">
+        curve
+        <select id="stretch" style="width: auto">
+          <option value="linear">linear</option>
+          <option value="sqrt">sqrt</option>
+          <option value="log">log</option>
+        </select>
+        gamma <input id="gamma" type="number" min="0.1" max="5" step="0.1" value="1" style="width: 56px" />
+        opacity <input id="opacity" type="number" min="0" max="1" step="0.1" value="1" style="width: 56px" />
         <button id="load">Load</button>
       </div>
       <small id="status"></small>
@@ -96,7 +107,15 @@
       const readRender = () => {
         let min = num("min", 0), max = num("max", 1);
         if (min >= max) max = min + 1; // avoid a zero/negative rescale range
-        return { min, max, colormap: document.getElementById("cmap").value };
+        return {
+          min,
+          max,
+          colormap: document.getElementById("cmap").value,
+          reversed: document.getElementById("reversed").checked,
+          stretch: document.getElementById("stretch").value,
+          gamma: num("gamma", 1),
+          opacity: num("opacity", 1),
+        };
       };
 
       const map = new maplibregl.Map({
@@ -141,16 +160,7 @@
             `${current.crsLabel}, ${current.levels.length} levels` +
               (current.hasPalette ? " (palette)" : ""),
           );
-          if (map.getLayer("cog")) map.removeLayer("cog");
-          if (map.getSource("cog")) map.removeSource("cog");
-          // Bump the tile-URL version so MapLibre refetches instead of serving
-          // cached tiles from a previously loaded raster (same cog:// template).
-          map.addSource("cog", {
-            type: "raster",
-            tiles: [`cog://{z}/{x}/{y}?v=${++cogVersion}`],
-            tileSize: 256,
-          });
-          map.addLayer({ id: "cog", type: "raster", source: "cog" });
+          restyle();
           // Zoom to the data: boundsLonLat = [minlon,minlat,maxlon,maxlat].
           const b = current.boundsLonLat;
           if (b && b.length === 4 && b.every(Number.isFinite)) {
@@ -161,10 +171,30 @@
         }
       }
 
+      // Re-render the active layer (e.g. after a panel control changes). Bumps
+      // the tile-URL version so MapLibre refetches with the current settings
+      // instead of serving cached tiles.
+      function restyle() {
+        if (!current) return;
+        if (map.getLayer("cog")) map.removeLayer("cog");
+        if (map.getSource("cog")) map.removeSource("cog");
+        map.addSource("cog", {
+          type: "raster",
+          tiles: [`cog://{z}/{x}/{y}?v=${++cogVersion}`],
+          tileSize: 256,
+        });
+        map.addLayer({ id: "cog", type: "raster", source: "cog" });
+      }
+
       document.getElementById("load").onclick = () => load();
       document.getElementById("file").onchange = (e) => {
         if (e.target.files[0]) load(e.target.files[0]);
       };
+      // Changing any render control re-renders the raster through cog-tiler-wasm.
+      for (const id of ["min", "max", "cmap", "reversed", "stretch", "gamma", "opacity"]) {
+        const el = document.getElementById(id);
+        el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", restyle);
+      }
       // Click the map to query the band value(s) at that point (TiTiler /point).
       map.on("click", async (e) => {
         if (!current) return;
