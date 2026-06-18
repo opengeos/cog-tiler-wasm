@@ -107,7 +107,7 @@ function computeStats(buf, nodata) {
 function transferCurve(t, stretch, gamma) {
   if (stretch === "sqrt") t = Math.sqrt(t);
   else if (stretch === "log") t = Math.log(1 + 99 * t) / Math.log(100);
-  if (gamma && gamma !== 1) t = Math.pow(t, 1 / Math.max(gamma, 1e-4));
+  if (Math.abs(gamma - 1) > 1e-9) t = Math.pow(t, 1 / Math.max(gamma, 1e-4));
   return t;
 }
 
@@ -390,11 +390,13 @@ export class CogSource {
     const nodata = opts.nodata != null ? opts.nodata : this.nodata;
     const ndSet = nodata != null && !Number.isNaN(nodata);
     // Transfer-curve params (parity with maplibre-gl-raster's shader pipeline).
+    // Normalize gamma/opacity here so the JS (RGB) and Rust (single-band) paths
+    // apply identical curves for the same options (e.g. gamma 0 -> clamped, not skipped).
     const stretch = opts.stretch || "linear";
-    const gamma = opts.gamma ?? 1;
+    const gamma = Number.isFinite(+opts.gamma) ? Math.max(+opts.gamma, 1e-4) : 1;
     const reversed = !!opts.reversed;
-    const opacity = opts.opacity ?? 1;
-    const alpha = Math.max(0, Math.min(255, Math.round(opacity * 255)));
+    const opacity = Number.isFinite(+opts.opacity) ? Math.max(0, Math.min(1, +opts.opacity)) : 1;
+    const alpha = Math.round(opacity * 255);
 
     // Gridded mercator -> source samples, and the source-coord bbox they span.
     const nx = new Float64Array((NG + 1) * (NG + 1));
