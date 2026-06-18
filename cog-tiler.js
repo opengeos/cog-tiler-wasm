@@ -107,7 +107,12 @@ async function makeReader(source) {
   } else {
     throw new Error("openCog: expected a URL string, ArrayBuffer, Uint8Array, or Blob");
   }
-  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  // Reuse the underlying buffer when the view spans it exactly; only copy for a
+  // partial view (avoids duplicating a large raster in memory).
+  const ab =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer
+      : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return {
     label: source.name || "(local file)",
     range: (a, b) => Promise.resolve(bytes.subarray(a, Math.min(b + 1, bytes.length))),

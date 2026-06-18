@@ -5,7 +5,7 @@
 import { createServer } from "node:http";
 import { stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { join, normalize, extname } from "node:path";
+import { join, normalize, extname, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..", "demo");
@@ -24,10 +24,16 @@ const TYPES = {
 };
 
 const server = createServer(async (req, res) => {
-  let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  let urlPath;
+  try {
+    urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  } catch {
+    return res.writeHead(400).end("bad request");
+  }
   if (urlPath.endsWith("/")) urlPath += "index.html";
-  const filePath = normalize(join(root, urlPath));
-  if (!filePath.startsWith(root)) return res.writeHead(403).end();
+  const filePath = normalize(join(root, "." + urlPath));
+  const rel = relative(root, filePath);
+  if (rel.startsWith("..") || isAbsolute(rel)) return res.writeHead(403).end();
 
   let st;
   try {
@@ -42,6 +48,9 @@ const server = createServer(async (req, res) => {
   if (range) {
     const start = Number(range[1]);
     const end = range[2] ? Math.min(Number(range[2]), st.size - 1) : st.size - 1;
+    if (start >= st.size || end < start) {
+      return res.writeHead(416, { "Content-Range": `bytes */${st.size}` }).end();
+    }
     res.writeHead(206, {
       "Content-Type": type,
       "Content-Range": `bytes ${start}-${end}/${st.size}`,
