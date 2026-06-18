@@ -110,6 +110,27 @@ map.addLayer({ id: "cog", type: "raster", source: "cog" });
 // and source.renderTileRGBA(z, x, y, render) / renderTilePNG(...) are also exposed.
 ```
 
+### TiTiler-style COG API
+
+`CogSource` mirrors the read endpoints of
+[TiTiler's COG API](https://developmentseed.org/titiler/endpoints/cog/),
+client-side (works on projected/paletted sources too, via the warp path):
+
+```js
+src.info();           // /cog/info     -> bounds, count, dtype, nodata, overviews, min/maxzoom, ...
+src.infoGeoJSON();    // /cog/info.geojson -> GeoJSON Feature (bbox polygon + info)
+src.tilejson();       // /cog/tilejson.json -> Mapbox TileJSON document
+await src.point(lon, lat);          // /cog/point -> band value(s) at a WGS84 coordinate
+await src.statistics({ maxSize });  // /cog/statistics -> per-band min/max/mean/std/
+                                    //   count/valid_percent/median/percentiles/histogram
+                                    //   (from a decimated overview)
+```
+
+Tile/image rendering, band selection (`bidx`/RGB), `preview`, and `bbox`/`part`
+are tracked in the [roadmap](#roadmap). Server-only endpoints (`/map.html`,
+`WMTSCapabilities.xml`, `/validate`, `/stac`) are out of scope for a client-side
+library.
+
 For a no-build page, map the peer deps with an import map (see
 [`demo/index.html`](demo/index.html)):
 
@@ -160,13 +181,15 @@ fully transparent.
 
 ## Roadmap
 
+- **TiTiler COG API parity** - done: `info`, `info.geojson`, `tilejson`,
+  `point`, `statistics` (see [above](#titiler-style-cog-api)). Next:
+  **`bidx`/RGB band selection**, more **colormaps**, and **`preview`** +
+  **`bbox`/`part`** image generation; later, band-math **expressions**.
 - **Warping** of projected/4326 sources and **paletted/categorical** rendering
   are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). Next: expose
   the source proj string + color table **upstream in `whitebox-wasm`** (it
   already parses both) to drop the geotiff.js dependency, then move the warp into
   the Rust crate (`proj4rs`).
-- **Multi-band / RGB** rendering and band-math expressions.
-- **More colormaps** and discrete/classified styling.
 - **Edge / WASI serving** - run the same module as a serverless XYZ endpoint
   near the data, not only in the browser.
 - **STAC / mosaics** - multi-asset orchestration.

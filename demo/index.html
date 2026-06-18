@@ -159,6 +159,21 @@
       document.getElementById("file").onchange = (e) => {
         if (e.target.files[0]) load(e.target.files[0]);
       };
+      // Click the map to query the band value(s) at that point (TiTiler /point).
+      map.on("click", async (e) => {
+        if (!current) return;
+        try {
+          const p = await current.point(e.lngLat.lng, e.lngLat.lat);
+          const v = p.values.filter((x) => x != null && !Number.isNaN(x));
+          status(
+            v.length
+              ? `value: ${v.join(", ")} @ ${e.lngLat.lng.toFixed(4)}, ${e.lngLat.lat.toFixed(4)}`
+              : "no data at clicked point",
+          );
+        } catch (err) {
+          status("point error: " + err);
+        }
+      });
       // Auto-load the prefilled sample so the demo works on first visit.
       if (document.getElementById("url").value.trim()) {
         if (map.loaded()) load();
