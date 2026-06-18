@@ -163,7 +163,7 @@ For a no-build page, map the peer deps with an import map (see
   { "imports": {
     "whitebox-wasm": "https://esm.sh/whitebox-wasm@0.4.0",
     "proj4": "https://esm.sh/proj4@2.20.9",
-    "geotiff": "https://esm.sh/geotiff@2.1.3",
+    "geotiff": "https://esm.sh/geotiff@3.0.5",
     "geotiff-geokeys-to-proj4": "https://esm.sh/geotiff-geokeys-to-proj4@2024.4.13"
   } }
 </script>
