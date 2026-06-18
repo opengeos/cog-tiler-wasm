@@ -49,6 +49,48 @@ pub fn tile_bounds_3857(z: u32, x: u32, y: u32) -> Vec<f64> {
     tile_bounds(z, x, y).to_vec()
 }
 
+/// Names of the built-in colormaps (JSON array string).
+#[wasm_bindgen]
+pub fn colormap_names() -> String {
+    serde_json::to_string(colormap::NAMES).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Colormap a single-band `w*h` grid to RGBA at 1:1 (no resampling), for any
+/// output size. `NaN` (and the nodata value when `nodata_alpha`) become
+/// transparent. Pairs with the JS warp loop, which samples a grid at the output
+/// resolution; `render` (which always outputs 256x256) is the tile-only variant.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn colorize(
+    pixels: Vec<f64>,
+    width: u32,
+    height: u32,
+    min: f64,
+    max: f64,
+    colormap: &str,
+    nodata: Option<f64>,
+    nodata_alpha: bool,
+) -> Vec<u8> {
+    let n = (width as usize) * (height as usize);
+    let mut out = vec![0u8; n * 4];
+    let range = max - min;
+    let inv = if range != 0.0 { 1.0 / range } else { 0.0 };
+    let nd = nodata.filter(|v| !v.is_nan());
+    for (chunk, &v) in out.chunks_exact_mut(4).zip(pixels.iter()) {
+        let is_nd = matches!(nd, Some(x) if v == x);
+        if v.is_nan() || (is_nd && nodata_alpha) {
+            continue; // transparent
+        }
+        let t = ((v - min) * inv).clamp(0.0, 1.0);
+        let [r, g, b] = colormap::lookup(colormap, t);
+        chunk[0] = r;
+        chunk[1] = g;
+        chunk[2] = b;
+        chunk[3] = 255;
+    }
+    out
+}
+
 /// Pixel dimensions of one COG overview level (level 0 = full resolution).
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct LevelDim {

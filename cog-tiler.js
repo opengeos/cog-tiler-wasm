@@ -21,7 +21,7 @@
  *   map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
  */
 import initWhitebox, { CogStream } from "whitebox-wasm";
-import initTiler, { CogTiler } from "./cog_tiler_wasm.js";
+import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
@@ -100,6 +100,33 @@ function computeStats(buf, nodata) {
     percentile_98: pct(98),
     histogram: [hist, edges],
   };
+}
+
+/** Normalize render rescale options to a list of [min,max] pairs (per band). */
+function rescaleList(opts) {
+  if (Array.isArray(opts.rescale) && opts.rescale.length) {
+    return Array.isArray(opts.rescale[0]) ? opts.rescale : [opts.rescale];
+  }
+  return [[opts.min ?? 0, opts.max ?? 1]];
+}
+
+/** WGS84 [w,s,e,n] -> EPSG:3857 [minx,miny,maxx,maxy]. */
+function mercExtentFromLonLat([w, s, e, n]) {
+  const t = proj4("EPSG:4326", "EPSG:3857");
+  const [minx, miny] = t.forward([w, s]);
+  const [maxx, maxy] = t.forward([e, n]);
+  return [minx, miny, maxx, maxy];
+}
+
+/** Output [w,h] honoring explicit width/height, else fitting `maxSize` to aspect. */
+function fitSize(extW, extH, maxSize, width, height) {
+  const ar = extW / extH || 1;
+  if (width && height) return [width, height];
+  if (width) return [width, Math.max(1, Math.round(width / ar))];
+  if (height) return [Math.max(1, Math.round(height * ar)), height];
+  return ar >= 1
+    ? [maxSize, Math.max(1, Math.round(maxSize / ar))]
+    : [Math.max(1, Math.round(maxSize * ar)), maxSize];
 }
 
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
@@ -194,17 +221,7 @@ export async function openCog(source) {
   if (!Array.isArray(levels) || levels.length === 0) {
     throw new Error("levels_json() returned no levels");
   }
-  // CogTiler renders an assembled f64 window -> RGBA (rescale + colormap +
-  // nodata). render() ignores the CRS, so we build one in both modes.
-  const tiler = new CogTiler(
-    Float64Array.from(gt),
-    levels[0].width,
-    levels[0].height,
-    3857,
-    stream.nodata,
-    JSON.stringify(levels),
-  );
-  const base = { url: label, range, stream, tiler, levels, gt, nodata: stream.nodata };
+  const base = { url: label, range, stream, levels, gt, nodata: stream.nodata };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -260,12 +277,9 @@ export class CogSource {
     return !!this.palette;
   }
 
-  /** Render an XYZ tile to a 256x256 RGBA `Uint8ClampedArray`, or null if empty. */
+  /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. */
   async renderTileRGBA(z, x, y, opts = {}) {
-    // Both EPSG:3857 (identity transform) and projected sources go through the
-    // same per-output-pixel mapping, which leaves out-of-raster pixels
-    // transparent instead of smearing edge pixels across partial tiles.
-    return this._warp(z, x, y, opts);
+    return this._renderExtent(tileBounds3857(z, x, y), TILE, TILE, opts);
   }
 
   /** Render an XYZ tile to PNG bytes (empty `Uint8Array` for a blank tile). */
@@ -340,22 +354,32 @@ export class CogSource {
     ];
   }
 
-  // Render a Web Mercator tile from the source on the fly. A coarse grid of
-  // mercator->source samples (the proj4 transform, or identity for EPSG:3857) is
-  // bilinearly interpolated per output pixel to a source location, then sampled
-  // from the source window - bilinear for continuous data, nearest for paletted
-  // (categorical) data. Out-of-raster pixels stay transparent (no edge smear).
-  // Paletted sources use the color table; others reuse the Rust colormap (render
-  // resamples 256->256, ~identity).
-  async _warp(z, x, y, { min = 0, max = 1, colormap = "viridis" } = {}) {
-    const tb = tileBounds3857(z, x, y);
+  // Render a Web Mercator extent (3857 [minx,miny,maxx,maxy]) to an outW x outH
+  // RGBA buffer. A coarse grid of mercator->source samples (the proj4 transform,
+  // or identity for EPSG:3857) is bilinearly interpolated per output pixel to a
+  // source location, then sampled from the source window. Bands: 1 (paletted via
+  // the color table, else single-band colormap) or >=3 (RGB composite, per-band
+  // rescale). Out-of-raster pixels stay transparent. Powers tiles, preview, bbox.
+  async _renderExtent(merc, outW, outH, opts = {}) {
+    const [minx, miny, maxx, maxy] = merc;
+    const l0 = this.levels[0];
+    const wanted = opts.bidx && opts.bidx.length ? opts.bidx : this.palette ? [1] : l0.bands >= 3 ? [1, 2, 3] : [1];
+    const bands0 = wanted.map((b) => b - 1).filter((b) => b >= 0 && b < l0.bands);
+    if (!bands0.length) bands0.push(0);
+    const rgb = bands0.length >= 3;
+    const rescales = rescaleList(opts);
+    const colormap = opts.colormap || "viridis";
+    const nodata = opts.nodata != null ? opts.nodata : this.nodata;
+    const ndSet = nodata != null && !Number.isNaN(nodata);
+
+    // Gridded mercator -> source samples, and the source-coord bbox they span.
     const nx = new Float64Array((NG + 1) * (NG + 1));
     const ny = new Float64Array((NG + 1) * (NG + 1));
     let sminx = Infinity, sminy = Infinity, smaxx = -Infinity, smaxy = -Infinity, any = false;
     for (let gy = 0; gy <= NG; gy++) {
-      const my = tb[3] - (gy / NG) * (tb[3] - tb[1]);
+      const my = maxy - (gy / NG) * (maxy - miny);
       for (let gx = 0; gx <= NG; gx++) {
-        const mx = tb[0] + (gx / NG) * (tb[2] - tb[0]);
+        const mx = minx + (gx / NG) * (maxx - minx);
         let s;
         try { s = this.toSource.forward([mx, my]); } catch { s = [NaN, NaN]; }
         const i = gy * (NG + 1) + gx;
@@ -371,7 +395,7 @@ export class CogSource {
     }
     if (!any) return null;
 
-    const level = this._chooseLevel((smaxx - sminx) / TILE);
+    const level = this._chooseLevel((smaxx - sminx) / outW);
     const lv = this.levels[level];
     const [lpw, lph] = this._levelPixelSize(level);
     const ox = this.gt[0], oy = this.gt[3];
@@ -381,42 +405,57 @@ export class CogSource {
     r0 = Math.max(0, Math.min(r0, lv.height)); r1 = Math.max(0, Math.min(r1, lv.height));
     const ww = c1 - c0, hh = r1 - r0;
     if (ww <= 0 || hh <= 0) return null;
-    const buf = await this._assembleWindow(level, c0, r0, ww, hh);
 
+    // Assemble the needed band window(s): 1 (palette/colormap) or 3 (RGB).
+    const used = rgb ? bands0.slice(0, 3) : [bands0[0]];
+    const bufs = await Promise.all(used.map((b) => this._assembleWindow(level, c0, r0, ww, hh, b)));
     const pal = this.palette;
-    const out = new Uint8ClampedArray(TILE * TILE * 4);
-    const grid = pal ? null : new Float64Array(TILE * TILE).fill(NaN);
-    for (let py = 0; py < TILE; py++) {
-      const fy = (py / TILE) * NG, gy0 = Math.min(NG - 1, Math.floor(fy)), ty = fy - gy0;
-      for (let px = 0; px < TILE; px++) {
-        const fx = (px / TILE) * NG, gx0 = Math.min(NG - 1, Math.floor(fx)), tx = fx - gx0;
+
+    const out = new Uint8ClampedArray(outW * outH * 4);
+    const grid = !pal && !rgb ? new Float64Array(outW * outH).fill(NaN) : null;
+    for (let py = 0; py < outH; py++) {
+      const fy = (py / outH) * NG, gy0 = Math.min(NG - 1, Math.floor(fy)), ty = fy - gy0;
+      for (let px = 0; px < outW; px++) {
+        const fx = (px / outW) * NG, gx0 = Math.min(NG - 1, Math.floor(fx)), tx = fx - gx0;
         const i00 = gy0 * (NG + 1) + gx0;
         const sx = bilin(nx[i00], nx[i00 + 1], nx[i00 + NG + 1], nx[i00 + NG + 2], tx, ty);
         const sy = bilin(ny[i00], ny[i00 + 1], ny[i00 + NG + 1], ny[i00 + NG + 2], tx, ty);
         if (!isFinite(sx) || !isFinite(sy)) continue;
         const fcol = (sx - ox) / lpw - c0;
         const frow = (oy - sy) / lph - r0;
+        const o = (py * outW + px) * 4;
         if (pal) {
           // Categorical: nearest-neighbor + color table.
           const col = Math.floor(fcol), row = Math.floor(frow);
           if (col < 0 || col >= ww || row < 0 || row >= hh) continue;
-          const v = buf[row * ww + col];
+          const v = bufs[0][row * ww + col];
           if (!isFinite(v)) continue;
           const ci = v & 255;
-          if (ci === 0 || (this.nodata != null && v === this.nodata)) continue;
-          const o = (py * TILE + px) * 4;
+          if (ci === 0 || (ndSet && v === nodata)) continue;
           out[o] = pal[ci * 4]; out[o + 1] = pal[ci * 4 + 1];
           out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = 255;
+        } else if (rgb) {
+          // RGB composite: bilinear-sample each band, rescale to 0..255.
+          let ok = true;
+          for (let k = 0; k < 3; k++) {
+            const v = sampleWindowBilinear(bufs[k], ww, hh, fcol, frow);
+            if (!isFinite(v) || (ndSet && v === nodata)) { ok = false; break; }
+            const [mn, mx] = rescales[k] || rescales[0];
+            out[o + k] = Math.max(0, Math.min(255, ((v - mn) / ((mx - mn) || 1)) * 255));
+          }
+          if (ok) out[o + 3] = 255;
+          else { out[o] = out[o + 1] = out[o + 2] = 0; }
         } else {
-          // Continuous: bilinear; NaN (out of raster) leaves the pixel transparent.
-          const v = sampleWindowBilinear(buf, ww, hh, fcol, frow);
-          if (!isFinite(v)) continue;
-          grid[py * TILE + px] = v;
+          // Continuous single band: bilinear; colormap applied below.
+          const v = sampleWindowBilinear(bufs[0], ww, hh, fcol, frow);
+          if (!isFinite(v) || (ndSet && v === nodata)) continue;
+          grid[py * outW + px] = v;
         }
       }
     }
-    if (pal) return out;
-    return this.tiler.render(grid, TILE, TILE, min, max, colormap, true);
+    if (pal || rgb) return out;
+    const [mn, mx] = rescales[0];
+    return colorize(grid, outW, outH, mn, mx, colormap, ndSet ? nodata : undefined, true);
   }
 
   // --- TiTiler-style read API ----------------------------------------------
@@ -523,15 +562,52 @@ export class CogSource {
     }
     return out;
   }
+
+  /** Render a preview of the whole dataset (≈ TiTiler `/cog/preview`).
+   *  Returns `{ width, height, rgba }`. `opts` accepts the render params
+   *  (`bidx`, `min`/`max`/`rescale`, `colormap`, `nodata`) plus `maxSize` /
+   *  `width` / `height`. */
+  async preview({ maxSize = 1024, width, height, ...render } = {}) {
+    const merc = mercExtentFromLonLat(this.boundsLonLat);
+    const [w, h] = fitSize(merc[2] - merc[0], merc[3] - merc[1], maxSize, width, height);
+    const rgba = (await this._renderExtent(merc, w, h, render)) || new Uint8ClampedArray(w * h * 4);
+    return { width: w, height: h, rgba };
+  }
+
+  /** Render a WGS84 bbox region (≈ TiTiler `/cog/bbox`). `bbox` is
+   *  [minLon, minLat, maxLon, maxLat]. Returns `{ width, height, rgba }`. */
+  async bbox(bbox, { maxSize = 1024, width, height, ...render } = {}) {
+    const merc = mercExtentFromLonLat(bbox);
+    const [w, h] = fitSize(merc[2] - merc[0], merc[3] - merc[1], maxSize, width, height);
+    const rgba = (await this._renderExtent(merc, w, h, render)) || new Uint8ClampedArray(w * h * 4);
+    return { width: w, height: h, rgba };
+  }
+
+  /** Like {@link preview}, encoded as PNG bytes. */
+  async previewPNG(opts = {}) {
+    const { width, height, rgba } = await this.preview(opts);
+    return rgbaToPng(rgba, width, height);
+  }
+
+  /** Like {@link bbox}, encoded as PNG bytes. */
+  async bboxPNG(bbox, opts = {}) {
+    const r = await this.bbox(bbox, opts);
+    return rgbaToPng(r.rgba, r.width, r.height);
+  }
 }
 
-/** Encode a 256x256 RGBA buffer to PNG bytes (browser; uses OffscreenCanvas). */
-export async function rgbaToPng(rgba) {
-  const img = new ImageData(new Uint8ClampedArray(rgba), TILE, TILE);
-  const cv = new OffscreenCanvas(TILE, TILE);
+/** Encode a `w`x`h` RGBA buffer to PNG bytes (browser; uses OffscreenCanvas). */
+export async function rgbaToPng(rgba, w = TILE, h = TILE) {
+  const img = new ImageData(new Uint8ClampedArray(rgba), w, h);
+  const cv = new OffscreenCanvas(w, h);
   cv.getContext("2d").putImageData(img, 0, 0);
   const blob = await cv.convertToBlob({ type: "image/png" });
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** Names of the built-in colormaps (for single-band rendering). */
+export function colormaps() {
+  return JSON.parse(colormap_names());
 }
 
 /**
