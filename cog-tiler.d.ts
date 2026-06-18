@@ -39,8 +39,15 @@ export declare class CogSource {
   readonly boundsLonLat: number[];
   /** True when the band is paletted (categorical) and rendered via its table. */
   readonly hasPalette: boolean;
-  /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. */
-  renderTileRGBA(z: number, x: number, y: number, opts?: RenderOptions): Promise<Uint8ClampedArray | null>;
+  /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. (Paletted
+   * tiles are a `Uint8ClampedArray`; continuous tiles are the wasm `render()`
+   * `Uint8Array`.) */
+  renderTileRGBA(
+    z: number,
+    x: number,
+    y: number,
+    opts?: RenderOptions,
+  ): Promise<Uint8Array | Uint8ClampedArray | null>;
   /** Render an XYZ tile to PNG bytes (empty Uint8Array for a blank tile). */
   renderTilePNG(z: number, x: number, y: number, opts?: RenderOptions): Promise<Uint8Array>;
 }
