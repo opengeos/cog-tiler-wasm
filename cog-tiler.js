@@ -147,6 +147,24 @@ function fitSize(extW, extH, maxSize, width, height) {
     : [Math.max(1, Math.round(max * ar)), max];
 }
 
+/**
+ * Read a TIFF tag from a geotiff.js image across major versions. geotiff v2
+ * exposes tags as direct `fileDirectory` properties; v3 defers them behind
+ * `fileDirectory.loadValue()` (large arrays such as ColorMap are not actualized
+ * eagerly), so a direct property read returns undefined there. Returns the tag
+ * value, or undefined when the tag is absent.
+ */
+async function readTiffTag(img, name) {
+  const fd = img.fileDirectory;
+  if (fd && fd[name] !== undefined) return fd[name]; // geotiff v2
+  if (typeof fd?.loadValue === "function") {
+    // geotiff v3: skip the load when the tag is absent so loadValue doesn't throw.
+    if (typeof fd.hasTag === "function" && !fd.hasTag(name)) return undefined;
+    return fd.loadValue(name);
+  }
+  return undefined;
+}
+
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
 function buildPalette(colorMap) {
   if (!colorMap) return null;
@@ -248,7 +266,7 @@ export async function openCog(source) {
   if (stream.epsg !== 3857 || multiBand) {
     tiff = await openTiff();
     img = await tiff.getImage();
-    planar = multiBand && img.fileDirectory.PlanarConfiguration === 2;
+    planar = multiBand && (await readTiffTag(img, "PlanarConfiguration")) === 2;
   }
   const base = { url: label, range, stream, levels, gt, nodata: stream.nodata, tiff, planar };
 
@@ -268,7 +286,7 @@ export async function openCog(source) {
   if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
   const toSource = proj4("EPSG:3857", srcDef); // forward: mercator -> source
   const toLonLat = proj4(srcDef, "EPSG:4326"); // forward: source -> lon/lat
-  const palette = buildPalette(img.fileDirectory.ColorMap);
+  const palette = buildPalette(await readTiffTag(img, "ColorMap"));
 
   // fitBounds bounds: transform the source corners to lon/lat.
   const fw = levels[0].width, fh = levels[0].height;
