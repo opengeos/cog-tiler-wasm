@@ -49,6 +49,10 @@
       <strong>cog-tiler-wasm</strong> — serverless COG tiling<br />
       <small>COG URL (EPSG:3857, or any projected/4326 - warped on the fly):</small>
       <input id="url" value="https://data.source.coop/giswqs/opengeos/dem.tif" placeholder="https://.../cog-3857.tif" />
+      <div style="margin: 4px 0">
+        <small>or open a local COG:</small>
+        <input id="file" type="file" accept=".tif,.tiff,image/tiff" style="width: auto" />
+      </div>
       <div>
         rescale
         <input
@@ -119,21 +123,25 @@
         render: readRender(),
       }));
 
-      async function load() {
-        const url = document.getElementById("url").value.trim();
-        if (!url) return;
-        status("opening COG…");
+      let cogVersion = 0;
+      // `source` is a URL string or a File (local raster); defaults to the URL box.
+      async function load(source) {
+        const src = source ?? document.getElementById("url").value.trim();
+        if (!src) return;
+        status(`opening ${typeof src === "string" ? "COG" : src.name}…`);
         try {
-          current = await openCog(url);
+          current = await openCog(src);
           status(
             `${current.crsLabel}, ${current.levels.length} levels` +
               (current.hasPalette ? " (palette)" : ""),
           );
           if (map.getLayer("cog")) map.removeLayer("cog");
           if (map.getSource("cog")) map.removeSource("cog");
+          // Bump the tile-URL version so MapLibre refetches instead of serving
+          // cached tiles from a previously loaded raster (same cog:// template).
           map.addSource("cog", {
             type: "raster",
-            tiles: ["cog://{z}/{x}/{y}"],
+            tiles: [`cog://{z}/{x}/{y}?v=${++cogVersion}`],
             tileSize: 256,
           });
           map.addLayer({ id: "cog", type: "raster", source: "cog" });
@@ -147,11 +155,14 @@
         }
       }
 
-      document.getElementById("load").onclick = load;
+      document.getElementById("load").onclick = () => load();
+      document.getElementById("file").onchange = (e) => {
+        if (e.target.files[0]) load(e.target.files[0]);
+      };
       // Auto-load the prefilled sample so the demo works on first visit.
       if (document.getElementById("url").value.trim()) {
         if (map.loaded()) load();
-        else map.on("load", load);
+        else map.on("load", () => load());
       }
     </script>
   </body>

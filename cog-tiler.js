@@ -76,15 +76,39 @@ function bilin(v00, v10, v01, v11, tx, ty) {
   return top + (bot - top) * ty;
 }
 
+// Build a byte reader from a URL string or an in-memory source (ArrayBuffer,
+// Uint8Array, or Blob/File). `range(a,b)` yields bytes [a..b]; `openTiff()`
+// returns a geotiff.js GeoTIFF for reading the CRS / color table from the header.
+async function makeReader(source) {
+  if (typeof source === "string") {
+    return { label: source, range: rangeFetcher(source), openTiff: () => GeoTIFF.fromUrl(source) };
+  }
+  let bytes;
+  if (source instanceof Uint8Array) bytes = source;
+  else if (source instanceof ArrayBuffer) bytes = new Uint8Array(source);
+  else if (source && typeof source.arrayBuffer === "function") {
+    bytes = new Uint8Array(await source.arrayBuffer()); // Blob / File
+  } else {
+    throw new Error("openCog: expected a URL string, ArrayBuffer, Uint8Array, or Blob");
+  }
+  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return {
+    label: source.name || "(local file)",
+    range: (a, b) => Promise.resolve(bytes.subarray(a, Math.min(b + 1, bytes.length))),
+    openTiff: () => GeoTIFF.fromArrayBuffer(ab),
+  };
+}
+
 /**
- * Open a COG and return a {@link CogSource} ready to render XYZ tiles.
- * Detects EPSG:3857 (fast path) vs. any other CRS (warp path), and reads the
- * source projection + color table from the GeoTIFF header (whitebox-wasm 0.4.0
- * does not expose them).
+ * Open a COG and return a {@link CogSource} ready to render XYZ tiles. `source`
+ * is a URL string (read via HTTP range) or in-memory bytes / a Blob / a File for
+ * a local raster. Detects EPSG:3857 (fast path) vs. any other CRS (warp path),
+ * reading the source projection + color table from the GeoTIFF header (which
+ * whitebox-wasm 0.4.0 does not expose).
  */
-export async function openCog(url) {
+export async function openCog(source) {
   await init();
-  const range = rangeFetcher(url);
+  const { range, openTiff, label } = await makeReader(source);
   // Parse the COG header; grow the prefix and retry for large COGs whose IFDs
   // exceed 64 KB (many overviews / huge tile-offset arrays).
   let stream;
@@ -111,7 +135,7 @@ export async function openCog(url) {
     stream.nodata,
     JSON.stringify(levels),
   );
-  const base = { url, range, stream, tiler, levels, gt, nodata: stream.nodata };
+  const base = { url: label, range, stream, tiler, levels, gt, nodata: stream.nodata };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -124,7 +148,7 @@ export async function openCog(url) {
   }
 
   // Warp path: read the real source CRS + optional palette from the header.
-  const tiff = await GeoTIFF.fromUrl(url);
+  const tiff = await openTiff();
   const img = await tiff.getImage();
   const srcDef = geokeysToProj4.toProj4(img.getGeoKeys()).proj4;
   if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");

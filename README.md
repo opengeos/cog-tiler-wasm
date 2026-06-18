@@ -101,6 +101,8 @@ registerCogProtocol(maplibregl, "cog", () => ({
 }));
 
 source = await openCog(url); // EPSG:3857 fast path, or warped if projected/4326
+// openCog also accepts a local raster: a File (e.g. from <input type=file>),
+// Blob, ArrayBuffer, or Uint8Array - read in memory, no server needed.
 map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
 map.addLayer({ id: "cog", type: "raster", source: "cog" });
 
