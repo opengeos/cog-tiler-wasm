@@ -107,6 +107,11 @@
         zoom: 2,
       });
 
+      // Zoom/rotate controls + a globe toggle (MapLibre 5) to test that COG
+      // tiles render in 3D globe projection, not just flat Web Mercator.
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+      map.addControl(new maplibregl.GlobeControl());
+
       let current = null;
       // The protocol resolves the active source + current render settings per tile.
       registerCogProtocol(maplibregl, "cog", () => ({
