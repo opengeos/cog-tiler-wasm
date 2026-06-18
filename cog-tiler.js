@@ -76,15 +76,60 @@ function bilin(v00, v10, v01, v11, tx, ty) {
   return top + (bot - top) * ty;
 }
 
+// Bilinear sample of a row-major window at fractional (fc,fr). Returns NaN when
+// the cell center is outside the window so out-of-raster pixels stay transparent
+// (no edge smear); falls back to nearest at the window edge / next to nodata.
+function sampleWindowBilinear(buf, w, h, fc, fr) {
+  const c0 = Math.floor(fc), r0 = Math.floor(fr);
+  if (c0 < 0 || c0 >= w || r0 < 0 || r0 >= h) return NaN;
+  const c1 = Math.min(c0 + 1, w - 1), r1 = Math.min(r0 + 1, h - 1);
+  const v00 = buf[r0 * w + c0];
+  if (Number.isNaN(v00)) return NaN;
+  const v10 = buf[r0 * w + c1], v01 = buf[r1 * w + c0], v11 = buf[r1 * w + c1];
+  if (Number.isNaN(v10) || Number.isNaN(v01) || Number.isNaN(v11)) return v00; // edge/nodata
+  const tx = fc - c0, ty = fr - r0;
+  const top = v00 + (v10 - v00) * tx, bot = v01 + (v11 - v01) * tx;
+  return top + (bot - top) * ty;
+}
+
+// Build a byte reader from a URL string or an in-memory source (ArrayBuffer,
+// Uint8Array, or Blob/File). `range(a,b)` yields bytes [a..b]; `openTiff()`
+// returns a geotiff.js GeoTIFF for reading the CRS / color table from the header.
+async function makeReader(source) {
+  if (typeof source === "string") {
+    return { label: source, range: rangeFetcher(source), openTiff: () => GeoTIFF.fromUrl(source) };
+  }
+  let bytes;
+  if (source instanceof Uint8Array) bytes = source;
+  else if (source instanceof ArrayBuffer) bytes = new Uint8Array(source);
+  else if (source && typeof source.arrayBuffer === "function") {
+    bytes = new Uint8Array(await source.arrayBuffer()); // Blob / File
+  } else {
+    throw new Error("openCog: expected a URL string, ArrayBuffer, Uint8Array, or Blob");
+  }
+  // Reuse the underlying buffer when the view spans it exactly; only copy for a
+  // partial view (avoids duplicating a large raster in memory).
+  const ab =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+      ? bytes.buffer
+      : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return {
+    label: source.name || "(local file)",
+    range: (a, b) => Promise.resolve(bytes.subarray(a, Math.min(b + 1, bytes.length))),
+    openTiff: () => GeoTIFF.fromArrayBuffer(ab),
+  };
+}
+
 /**
- * Open a COG and return a {@link CogSource} ready to render XYZ tiles.
- * Detects EPSG:3857 (fast path) vs. any other CRS (warp path), and reads the
- * source projection + color table from the GeoTIFF header (whitebox-wasm 0.4.0
- * does not expose them).
+ * Open a COG and return a {@link CogSource} ready to render XYZ tiles. `source`
+ * is a URL string (read via HTTP range) or in-memory bytes / a Blob / a File for
+ * a local raster. Detects EPSG:3857 (fast path) vs. any other CRS (warp path),
+ * reading the source projection + color table from the GeoTIFF header (which
+ * whitebox-wasm 0.4.0 does not expose).
  */
-export async function openCog(url) {
+export async function openCog(source) {
   await init();
-  const range = rangeFetcher(url);
+  const { range, openTiff, label } = await makeReader(source);
   // Parse the COG header; grow the prefix and retry for large COGs whose IFDs
   // exceed 64 KB (many overviews / huge tile-offset arrays).
   let stream;
@@ -111,7 +156,7 @@ export async function openCog(url) {
     stream.nodata,
     JSON.stringify(levels),
   );
-  const base = { url, range, stream, tiler, levels, gt, nodata: stream.nodata };
+  const base = { url: label, range, stream, tiler, levels, gt, nodata: stream.nodata };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -119,12 +164,13 @@ export async function openCog(url) {
       mode: "3857",
       crsLabel: "EPSG:3857",
       palette: null,
+      toSource: { forward: (c) => c }, // identity: mercator meters == source meters
       boundsLonLat: Array.from(stream.bounds_lonlat()),
     });
   }
 
   // Warp path: read the real source CRS + optional palette from the header.
-  const tiff = await GeoTIFF.fromUrl(url);
+  const tiff = await openTiff();
   const img = await tiff.getImage();
   const srcDef = geokeysToProj4.toProj4(img.getGeoKeys()).proj4;
   if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
@@ -168,9 +214,10 @@ export class CogSource {
 
   /** Render an XYZ tile to a 256x256 RGBA `Uint8ClampedArray`, or null if empty. */
   async renderTileRGBA(z, x, y, opts = {}) {
-    return this.mode === "warp"
-      ? this._warp(z, x, y, opts)
-      : this._render3857(z, x, y, opts);
+    // Both EPSG:3857 (identity transform) and projected sources go through the
+    // same per-output-pixel mapping, which leaves out-of-raster pixels
+    // transparent instead of smearing edge pixels across partial tiles.
+    return this._warp(z, x, y, opts);
   }
 
   /** Render an XYZ tile to PNG bytes (empty `Uint8Array` for a blank tile). */
@@ -244,19 +291,13 @@ export class CogSource {
     ];
   }
 
-  // Fast path: source already EPSG:3857, so a tile maps affinely to a window.
-  async _render3857(z, x, y, { min = 0, max = 1, colormap = "viridis" } = {}) {
-    const win = this.tiler.pixel_window_for_tile(z, x, y);
-    if (win.empty) return null;
-    const buf = await this._assembleWindow(win.level, win.x, win.y, win.w, win.h);
-    return this.tiler.render(buf, win.w, win.h, min, max, colormap, true);
-  }
-
-  // Warp path: reproject a Web Mercator tile from the source CRS on the fly.
-  // A coarse grid of mercator->source samples (proj4) is bilinearly interpolated
-  // per output pixel, then nearest-sampled from the source window (correct for
-  // categorical data). Paletted sources use the color table; others reuse the
-  // Rust colormap (render resamples 256->256, ~identity).
+  // Render a Web Mercator tile from the source on the fly. A coarse grid of
+  // mercator->source samples (the proj4 transform, or identity for EPSG:3857) is
+  // bilinearly interpolated per output pixel to a source location, then sampled
+  // from the source window - bilinear for continuous data, nearest for paletted
+  // (categorical) data. Out-of-raster pixels stay transparent (no edge smear).
+  // Paletted sources use the color table; others reuse the Rust colormap (render
+  // resamples 256->256, ~identity).
   async _warp(z, x, y, { min = 0, max = 1, colormap = "viridis" } = {}) {
     const tb = tileBounds3857(z, x, y);
     const nx = new Float64Array((NG + 1) * (NG + 1));
@@ -304,18 +345,23 @@ export class CogSource {
         const sx = bilin(nx[i00], nx[i00 + 1], nx[i00 + NG + 1], nx[i00 + NG + 2], tx, ty);
         const sy = bilin(ny[i00], ny[i00 + 1], ny[i00 + NG + 1], ny[i00 + NG + 2], tx, ty);
         if (!isFinite(sx) || !isFinite(sy)) continue;
-        const col = Math.floor((sx - ox) / lpw) - c0;
-        const row = Math.floor((oy - sy) / lph) - r0;
-        if (col < 0 || col >= ww || row < 0 || row >= hh) continue;
-        const v = buf[row * ww + col];
-        if (!isFinite(v)) continue;
+        const fcol = (sx - ox) / lpw - c0;
+        const frow = (oy - sy) / lph - r0;
         if (pal) {
+          // Categorical: nearest-neighbor + color table.
+          const col = Math.floor(fcol), row = Math.floor(frow);
+          if (col < 0 || col >= ww || row < 0 || row >= hh) continue;
+          const v = buf[row * ww + col];
+          if (!isFinite(v)) continue;
           const ci = v & 255;
           if (ci === 0 || (this.nodata != null && v === this.nodata)) continue;
           const o = (py * TILE + px) * 4;
           out[o] = pal[ci * 4]; out[o + 1] = pal[ci * 4 + 1];
           out[o + 2] = pal[ci * 4 + 2]; out[o + 3] = 255;
         } else {
+          // Continuous: bilinear; NaN (out of raster) leaves the pixel transparent.
+          const v = sampleWindowBilinear(buf, ww, hh, fcol, frow);
+          if (!isFinite(v)) continue;
           grid[py * TILE + px] = v;
         }
       }

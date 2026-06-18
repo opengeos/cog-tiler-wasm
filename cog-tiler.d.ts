@@ -55,8 +55,12 @@ export declare class CogSource {
 /** Initialize the wasm modules (idempotent). Resolve before `openCog`. */
 export declare function init(): Promise<unknown>;
 
-/** Open a COG and return a {@link CogSource} ready to render XYZ tiles. */
-export declare function openCog(url: string): Promise<CogSource>;
+/**
+ * Open a COG and return a {@link CogSource} ready to render XYZ tiles. Pass a URL
+ * string (read via HTTP range) or in-memory bytes / a Blob / a File for a local
+ * raster.
+ */
+export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
 
 /** Encode a 256x256 RGBA buffer to PNG bytes (browser; uses OffscreenCanvas). */
 export declare function rgbaToPng(rgba: Uint8Array | Uint8ClampedArray): Promise<Uint8Array>;

@@ -59,15 +59,15 @@ wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir pkg
 
 ### Run the demo locally
 
-The demo imports `./cog-tiler.js`, which imports `./cog_tiler_wasm.js`, so build
-the wasm and copy the module into `demo/`, then serve that folder (any static
-server with HTTP range support works; the bundled sample is same-origin, no CORS):
-
 ```bash
-wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir ../../demo
-cp cog-tiler.js examples/sample-3857-cog.tif demo/
-python3 -m http.server -d demo 8000   # then open http://localhost:8000/
+npm run dev   # builds the wasm, assembles demo/, serves http://localhost:8000/
 ```
+
+`npm run dev` builds the wasm into `demo/`, copies in `cog-tiler.js` + the sample,
+and starts a zero-dependency static server with **HTTP range support** (which the
+tile streaming needs - the stdlib `python -m http.server` does not do ranges).
+Set `PORT` to change the port. No `npm install` is required (the dev scripts use
+only Node built-ins; the demo loads its peer deps from a CDN via an import map).
 
 The published [GitHub Pages demo](https://opengeos.github.io/cog-tiler-wasm/) is
 built the same way by `.github/workflows/pages.yml`.
@@ -101,6 +101,8 @@ registerCogProtocol(maplibregl, "cog", () => ({
 }));
 
 source = await openCog(url); // EPSG:3857 fast path, or warped if projected/4326
+// openCog also accepts a local raster: a File (e.g. from <input type=file>),
+// Blob, ArrayBuffer, or Uint8Array - read in memory, no server needed.
 map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
 map.addLayer({ id: "cog", type: "raster", source: "cog" });
 

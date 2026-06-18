@@ -1,0 +1,14 @@
+{
+  "name": "cog-tiler-wasm-dev",
+  "private": true,
+  "type": "module",
+  "description": "Dev scripts for the cog-tiler-wasm demo (the published package is assembled under crates/cog-tiler-wasm/pkg).",
+  "scripts": {
+    "build:wasm": "wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir ../../demo",
+    "assemble:demo": "node scripts/assemble-demo.mjs",
+    "predev": "npm run build:wasm && npm run assemble:demo",
+    "dev": "node scripts/serve-demo.mjs",
+    "serve": "node scripts/serve-demo.mjs",
+    "build:pkg": "wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir pkg && node scripts/prepare-pkg.mjs crates/cog-tiler-wasm/pkg"
+  }
+}
