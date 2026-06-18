@@ -210,10 +210,12 @@ fully transparent.
   colormaps (see [above](#titiler-style-cog-api)). Next: band-math
   **`expression`** and `color_formula`.
 - **Warping** of projected/4326 sources and **paletted/categorical** rendering
-  are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). Next: expose
-  the source proj string + color table **upstream in `whitebox-wasm`** (it
-  already parses both) to drop the geotiff.js dependency, then move the warp into
-  the Rust crate (`proj4rs`).
+  are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). **Planar**
+  (`INTERLEAVE=BAND`) multi-band COGs are read per-band via geotiff.js too, since
+  whitebox-wasm's streaming decoder is chunky-only. Next: planar support
+  **upstream in `whitebox-wasm`** (and exposing its proj string + color table) to
+  drop the geotiff.js dependency, then move the warp into the Rust crate
+  (`proj4rs`).
 - **Edge / WASI serving** - run the same module as a serverless XYZ endpoint
   near the data, not only in the browser.
 - **STAC / mosaics** - multi-asset orchestration.
