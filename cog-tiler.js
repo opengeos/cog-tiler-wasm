@@ -239,7 +239,18 @@ export async function openCog(source) {
   if (!Array.isArray(levels) || levels.length === 0) {
     throw new Error("levels_json() returned no levels");
   }
-  const base = { url: label, range, stream, levels, gt, nodata: stream.nodata };
+  // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857) or to check
+  // the planar config (multi-band). whitebox-wasm's streaming decoder is
+  // chunky-only, so planar (INTERLEAVE=BAND) multi-band COGs are read per-band
+  // through geotiff.js instead (see _assembleWindow / point).
+  const multiBand = levels[0].bands > 1;
+  let tiff = null, img = null, planar = false;
+  if (stream.epsg !== 3857 || multiBand) {
+    tiff = await openTiff();
+    img = await tiff.getImage();
+    planar = multiBand && img.fileDirectory.PlanarConfiguration === 2;
+  }
+  const base = { url: label, range, stream, levels, gt, nodata: stream.nodata, tiff, planar };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -253,8 +264,6 @@ export async function openCog(source) {
   }
 
   // Warp path: read the real source CRS + optional palette from the header.
-  const tiff = await openTiff();
-  const img = await tiff.getImage();
   const srcDef = geokeysToProj4.toProj4(img.getGeoKeys()).proj4;
   if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
   const toSource = proj4("EPSG:3857", srcDef); // forward: mercator -> source
@@ -326,10 +335,27 @@ export class CogSource {
     return p;
   }
 
-  // Fetch (parallel, cached) + decode the source tiles covering a level pixel
-  // window and assemble band `band` (0-based) into a row-major f64 buffer
-  // (NaN = no data). decode_tile_f64 is pixel-interleaved, so stride by `bands`.
+  /** geotiff.js image for an overview level (cached). Used for planar reads. */
+  _tiffImage(level) {
+    if (!this._imgs) this._imgs = new Map();
+    let p = this._imgs.get(level);
+    if (!p) {
+      p = this.tiff.getImage(level);
+      this._imgs.set(level, p);
+    }
+    return p;
+  }
+
+  // Fetch + decode band `band` (0-based) over a level pixel window into a
+  // row-major buffer. Chunky COGs go through whitebox (cached, NaN for gaps);
+  // planar (INTERLEAVE=BAND) COGs are read per-band via geotiff.js, which
+  // whitebox's chunky-only streaming decoder can't address.
   async _assembleWindow(level, x, y, w, h, band = 0) {
+    if (this.planar) {
+      const img = await this._tiffImage(level);
+      const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
+      return rasters[0]; // typed array, length w*h, row-major
+    }
     const lv = this.levels[level];
     const tiles = JSON.parse(this.stream.tiles_for_window(level, x, y, w, h));
     const decoded = await Promise.all(tiles.map((t) => this._getTile(level, t)));
@@ -570,14 +596,23 @@ export class CogSource {
     if (col < 0 || col >= l0.width || row < 0 || row >= l0.height) {
       return { coordinates: [lon, lat], values: [], band_names: [], outside: true };
     }
-    const tcol = Math.floor(col / l0.tile_width), trow = Math.floor(row / l0.tile_height);
-    const [off, len] = Array.from(this.stream.tile_range(0, tcol, trow));
-    const px = await this._getTile(0, { col: tcol, row: trow, offset: off, length: len });
-    const base = ((row % l0.tile_height) * l0.tile_width + (col % l0.tile_width)) * l0.bands;
     const bands = bidx ? bidx.map((b) => b - 1) : Array.from({ length: l0.bands }, (_, i) => i);
+    let values;
+    if (this.planar) {
+      // Planar: whitebox can't address bands 1..n; read the pixel via geotiff.js.
+      const img = await this._tiffImage(0);
+      const r = await img.readRasters({ window: [col, row, col + 1, row + 1], samples: bands });
+      values = r.map((b) => b[0]);
+    } else {
+      const tcol = Math.floor(col / l0.tile_width), trow = Math.floor(row / l0.tile_height);
+      const [off, len] = Array.from(this.stream.tile_range(0, tcol, trow));
+      const px = await this._getTile(0, { col: tcol, row: trow, offset: off, length: len });
+      const base = ((row % l0.tile_height) * l0.tile_width + (col % l0.tile_width)) * l0.bands;
+      values = bands.map((b) => px[base + b]);
+    }
     return {
       coordinates: [lon, lat],
-      values: bands.map((b) => px[base + b]),
+      values,
       band_names: bands.map((b) => `b${b + 1}`),
     };
   }
