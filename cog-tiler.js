@@ -54,6 +54,54 @@ const rangeFetcher = (url) => (a, b) =>
     .then((r) => r.arrayBuffer())
     .then((b) => new Uint8Array(b));
 
+/** Map a level descriptor's sample format + bit depth to a numpy-style dtype. */
+function dtypeOf(lv) {
+  const b = lv.bits_per_sample;
+  const f = (lv.sample_format || "").toLowerCase();
+  if (f.includes("float") || f.includes("ieee")) return "float" + b;
+  if (f === "uint" || f.includes("unsigned")) return "uint" + b;
+  if (f === "int" || f.includes("signed")) return "int" + b;
+  return (f || "uint") + b;
+}
+
+/** Min/max/mean/std/count/valid_percent/percentiles/histogram for a band buffer. */
+function computeStats(buf, nodata) {
+  let min = Infinity, max = -Infinity, sum = 0, sumsq = 0;
+  const valid = [];
+  for (let i = 0; i < buf.length; i++) {
+    const v = buf[i];
+    if (Number.isNaN(v)) continue;
+    if (nodata != null && v === nodata) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+    sum += v;
+    sumsq += v * v;
+    valid.push(v);
+  }
+  const count = valid.length;
+  if (count === 0) return { count: 0, valid_percent: 0 };
+  const mean = sum / count;
+  const std = Math.sqrt(Math.max(0, sumsq / count - mean * mean));
+  valid.sort((a, b) => a - b);
+  const pct = (p) => valid[Math.min(count - 1, Math.floor((p / 100) * count))];
+  const bins = 10, span = max - min || 1, hist = new Array(bins).fill(0);
+  for (const v of valid) {
+    let k = Math.floor(((v - min) / span) * bins);
+    if (k >= bins) k = bins - 1;
+    if (k < 0) k = 0;
+    hist[k]++;
+  }
+  const edges = Array.from({ length: bins + 1 }, (_, i) => min + (span * i) / bins);
+  return {
+    min, max, mean, std, count,
+    valid_percent: (count / buf.length) * 100,
+    median: pct(50),
+    percentile_2: pct(2),
+    percentile_98: pct(98),
+    histogram: [hist, edges],
+  };
+}
+
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
 function buildPalette(colorMap) {
   if (!colorMap) return null;
@@ -247,8 +295,9 @@ export class CogSource {
   }
 
   // Fetch (parallel, cached) + decode the source tiles covering a level pixel
-  // window and assemble them into a row-major f64 buffer (NaN = no data).
-  async _assembleWindow(level, x, y, w, h) {
+  // window and assemble band `band` (0-based) into a row-major f64 buffer
+  // (NaN = no data). decode_tile_f64 is pixel-interleaved, so stride by `bands`.
+  async _assembleWindow(level, x, y, w, h, band = 0) {
     const lv = this.levels[level];
     const tiles = JSON.parse(this.stream.tiles_for_window(level, x, y, w, h));
     const decoded = await Promise.all(tiles.map((t) => this._getTile(level, t)));
@@ -263,7 +312,7 @@ export class CogSource {
         for (let rx = 0; rx < tw; rx++) {
           const ox = tx0 + rx - x;
           if (ox < 0 || ox >= w) continue;
-          buf[oy * w + ox] = px[(ry * tw + rx) * bands]; // band 0
+          buf[oy * w + ox] = px[(ry * tw + rx) * bands + band];
         }
       }
     });
@@ -368,6 +417,111 @@ export class CogSource {
     }
     if (pal) return out;
     return this.tiler.render(grid, TILE, TILE, min, max, colormap, true);
+  }
+
+  // --- TiTiler-style read API ----------------------------------------------
+
+  /** XYZ zoom whose tile resolution matches the full-res pixel size. */
+  _maxzoom() {
+    const res = Math.abs(this.gt[1]);
+    return Math.max(0, Math.min(24, Math.round(Math.log2((2 * OS) / (TILE * res)))));
+  }
+
+  /** XYZ zoom whose tile resolution matches the coarsest overview. */
+  _minzoom() {
+    const c = this.levels[this.levels.length - 1];
+    const res = Math.abs(this.gt[1]) * (this.levels[0].width / c.width);
+    return Math.max(0, Math.min(24, Math.round(Math.log2((2 * OS) / (TILE * res)))));
+  }
+
+  /** Dataset info (≈ TiTiler `/cog/info`). */
+  info() {
+    const l0 = this.levels[0];
+    const b = this.boundsLonLat;
+    return {
+      bounds: b, // WGS84 [minlon, minlat, maxlon, maxlat]
+      crs: this.crsLabel,
+      width: l0.width,
+      height: l0.height,
+      count: l0.bands,
+      dtype: dtypeOf(l0),
+      nodata: this.nodata == null || Number.isNaN(this.nodata) ? null : this.nodata,
+      colorinterp: this.palette ? ["palette"] : null,
+      overviews: this.levels.length - 1,
+      tile_size: [l0.tile_width, l0.tile_height],
+      minzoom: this._minzoom(),
+      maxzoom: this._maxzoom(),
+      band_descriptions: Array.from({ length: l0.bands }, (_, i) => `b${i + 1}`),
+      compression: l0.compression,
+    };
+  }
+
+  /** Dataset info as a GeoJSON Feature (≈ TiTiler `/cog/info.geojson`). */
+  infoGeoJSON() {
+    const [w, s, e, n] = this.boundsLonLat;
+    return {
+      type: "Feature",
+      geometry: {
+        type: "Polygon",
+        coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
+      },
+      properties: this.info(),
+    };
+  }
+
+  /** Mapbox TileJSON document (≈ TiTiler `/cog/tilejson.json`). */
+  tilejson({ tilesUrl = "cog://{z}/{x}/{y}", minzoom, maxzoom, scheme = "xyz" } = {}) {
+    const b = this.boundsLonLat;
+    const mn = minzoom ?? this._minzoom();
+    return {
+      tilejson: "2.2.0",
+      version: "1.0.0",
+      scheme,
+      tiles: [tilesUrl],
+      minzoom: mn,
+      maxzoom: maxzoom ?? this._maxzoom(),
+      bounds: b,
+      center: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, mn],
+    };
+  }
+
+  /** Band value(s) at a WGS84 lon/lat (≈ TiTiler `/cog/point/{lon},{lat}`). */
+  async point(lon, lat, { bidx } = {}) {
+    const [mx, my] = proj4("EPSG:4326", "EPSG:3857").forward([lon, lat]);
+    const [sx, sy] = this.toSource.forward([mx, my]); // source CRS coords
+    const l0 = this.levels[0];
+    const col = Math.floor((sx - this.gt[0]) / Math.abs(this.gt[1]));
+    const row = Math.floor((this.gt[3] - sy) / Math.abs(this.gt[5]));
+    if (col < 0 || col >= l0.width || row < 0 || row >= l0.height) {
+      return { coordinates: [lon, lat], values: [], band_names: [], outside: true };
+    }
+    const tcol = Math.floor(col / l0.tile_width), trow = Math.floor(row / l0.tile_height);
+    const [off, len] = Array.from(this.stream.tile_range(0, tcol, trow));
+    const px = await this._getTile(0, { col: tcol, row: trow, offset: off, length: len });
+    const base = ((row % l0.tile_height) * l0.tile_width + (col % l0.tile_width)) * l0.bands;
+    const bands = bidx ? bidx.map((b) => b - 1) : Array.from({ length: l0.bands }, (_, i) => i);
+    return {
+      coordinates: [lon, lat],
+      values: bands.map((b) => px[base + b]),
+      band_names: bands.map((b) => `b${b + 1}`),
+    };
+  }
+
+  /** Per-band statistics (≈ TiTiler `/cog/statistics`), from a decimated
+   *  overview (the largest one whose width is ≤ `maxSize`). */
+  async statistics({ maxSize = 1024 } = {}) {
+    let level = this.levels.length - 1;
+    for (let i = 0; i < this.levels.length; i++) {
+      if (this.levels[i].width <= maxSize) { level = i; break; }
+    }
+    const lv = this.levels[level];
+    const nodata = this.nodata == null || Number.isNaN(this.nodata) ? null : this.nodata;
+    const out = {};
+    for (let b = 0; b < lv.bands; b++) {
+      const buf = await this._assembleWindow(level, 0, 0, lv.width, lv.height, b);
+      out[`b${b + 1}`] = computeStats(buf, nodata);
+    }
+    return out;
   }
 }
 

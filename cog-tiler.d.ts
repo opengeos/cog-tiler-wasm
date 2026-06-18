@@ -50,6 +50,28 @@ export declare class CogSource {
   ): Promise<Uint8Array | Uint8ClampedArray | null>;
   /** Render an XYZ tile to PNG bytes (empty Uint8Array for a blank tile). */
   renderTilePNG(z: number, x: number, y: number, opts?: RenderOptions): Promise<Uint8Array>;
+
+  // TiTiler-style read API.
+
+  /** Dataset info (bounds, bands, dtype, nodata, overviews, min/maxzoom, ...). */
+  info(): Record<string, unknown>;
+  /** Dataset info as a GeoJSON Feature (bbox polygon + info properties). */
+  infoGeoJSON(): Record<string, unknown>;
+  /** Mapbox TileJSON document. */
+  tilejson(opts?: {
+    tilesUrl?: string;
+    minzoom?: number;
+    maxzoom?: number;
+    scheme?: string;
+  }): Record<string, unknown>;
+  /** Band value(s) at a WGS84 lon/lat. `bidx` is 1-based; default all bands. */
+  point(
+    lon: number,
+    lat: number,
+    opts?: { bidx?: number[] },
+  ): Promise<{ coordinates: [number, number]; values: number[]; band_names: string[]; outside?: boolean }>;
+  /** Per-band statistics from a decimated overview (≤ `maxSize` px wide). */
+  statistics(opts?: { maxSize?: number }): Promise<Record<string, Record<string, unknown>>>;
 }
 
 /** Initialize the wasm modules (idempotent). Resolve before `openCog`. */
