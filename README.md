@@ -117,19 +117,32 @@ map.addLayer({ id: "cog", type: "raster", source: "cog" });
 client-side (works on projected/paletted sources too, via the warp path):
 
 ```js
-src.info();           // /cog/info     -> bounds, count, dtype, nodata, overviews, min/maxzoom, ...
+// Metadata / read
+src.info();           // /cog/info         -> bounds, count, dtype, nodata, overviews, min/maxzoom, ...
 src.infoGeoJSON();    // /cog/info.geojson -> GeoJSON Feature (bbox polygon + info)
 src.tilejson();       // /cog/tilejson.json -> Mapbox TileJSON document
 await src.point(lon, lat);          // /cog/point -> band value(s) at a WGS84 coordinate
-await src.statistics({ maxSize });  // /cog/statistics -> per-band min/max/mean/std/
-                                    //   count/valid_percent/median/percentiles/histogram
-                                    //   (from a decimated overview)
+await src.statistics({ maxSize });  // /cog/statistics -> per-band min/max/mean/std/count/
+                                    //   valid_percent/median/percentiles/histogram (from an overview)
+
+// Image generation (all accept render params below)
+await src.previewPNG({ maxSize: 1024 });               // /cog/preview -> PNG bytes
+await src.bboxPNG([minLon, minLat, maxLon, maxLat]);   // /cog/bbox    -> PNG bytes
+await src.preview(opts);   // -> { width, height, rgba }  (bbox() likewise)
+
+// Render params (on tiles, preview, bbox):
+//   bidx:    1-based bands; one -> colormap/palette, three -> RGB composite
+//   rescale: [[min,max], ...] per band, or [min,max]; or min/max shorthand
+//   colormap: one of colormaps()  (viridis, magma, plasma, inferno, cividis,
+//             turbo, terrain, blues, greens, reds, rdylgn, spectral, gray)
+//   nodata:  override the transparency value
+await src.renderTilePNG(z, x, y, { bidx: [4, 3, 2], rescale: [0, 3000] }); // false-color RGB
+import { colormaps } from "cog-tiler-wasm";
 ```
 
-Tile/image rendering, band selection (`bidx`/RGB), `preview`, and `bbox`/`part`
-are tracked in the [roadmap](#roadmap). Server-only endpoints (`/map.html`,
-`WMTSCapabilities.xml`, `/validate`, `/stac`) are out of scope for a client-side
-library.
+Server-only endpoints (`/map.html`, `WMTSCapabilities.xml`, `/validate`,
+`/stac`) are out of scope for a client-side library; band-math `expression` is
+on the [roadmap](#roadmap).
 
 For a no-build page, map the peer deps with an import map (see
 [`demo/index.html`](demo/index.html)):
@@ -182,9 +195,9 @@ fully transparent.
 ## Roadmap
 
 - **TiTiler COG API parity** - done: `info`, `info.geojson`, `tilejson`,
-  `point`, `statistics` (see [above](#titiler-style-cog-api)). Next:
-  **`bidx`/RGB band selection**, more **colormaps**, and **`preview`** +
-  **`bbox`/`part`** image generation; later, band-math **expressions**.
+  `point`, `statistics`, `preview`, `bbox`, `bidx`/RGB band selection, and 13
+  colormaps (see [above](#titiler-style-cog-api)). Next: band-math
+  **`expression`** and `color_formula`.
 - **Warping** of projected/4326 sources and **paletted/categorical** rendering
   are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). Next: expose
   the source proj string + color table **upstream in `whitebox-wasm`** (it

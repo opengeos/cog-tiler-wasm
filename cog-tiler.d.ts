@@ -8,8 +8,22 @@ export interface RenderOptions {
   min?: number;
   /** High end of the rescale range (continuous bands). Default 1. */
   max?: number;
-  /** Colormap name: "viridis" | "magma" | "terrain" | "gray". Default "viridis". */
+  /** Per-band rescale `[[min,max], ...]`, or a single `[min,max]`. Overrides min/max. */
+  rescale?: [number, number][] | [number, number];
+  /** Colormap name (single-band). See {@link colormaps}. Default "viridis". */
   colormap?: string;
+  /** 1-based band indices. One band -> palette/colormap; three -> RGB composite.
+   *  Default: all-bands RGB if the source has >= 3 bands, else band 1. */
+  bidx?: number[];
+  /** Override the source nodata value for transparency. */
+  nodata?: number;
+}
+
+/** A rendered image: row-major RGBA, `width * height * 4` bytes. */
+export interface RenderedImage {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
 }
 
 /** A level descriptor from `CogStream.levels_json()`. */
@@ -72,7 +86,29 @@ export declare class CogSource {
   ): Promise<{ coordinates: [number, number]; values: number[]; band_names: string[]; outside?: boolean }>;
   /** Per-band statistics from a decimated overview (≤ `maxSize` px wide). */
   statistics(opts?: { maxSize?: number }): Promise<Record<string, Record<string, unknown>>>;
+
+  /** Render a preview of the whole dataset (≈ `/cog/preview`). */
+  preview(
+    opts?: RenderOptions & { maxSize?: number; width?: number; height?: number },
+  ): Promise<RenderedImage>;
+  /** Render a WGS84 bbox `[minLon, minLat, maxLon, maxLat]` region (≈ `/cog/bbox`). */
+  bbox(
+    bbox: [number, number, number, number],
+    opts?: RenderOptions & { maxSize?: number; width?: number; height?: number },
+  ): Promise<RenderedImage>;
+  /** {@link preview} encoded as PNG bytes. */
+  previewPNG(
+    opts?: RenderOptions & { maxSize?: number; width?: number; height?: number },
+  ): Promise<Uint8Array>;
+  /** {@link bbox} encoded as PNG bytes. */
+  bboxPNG(
+    bbox: [number, number, number, number],
+    opts?: RenderOptions & { maxSize?: number; width?: number; height?: number },
+  ): Promise<Uint8Array>;
 }
+
+/** Names of the built-in single-band colormaps. */
+export declare function colormaps(): string[];
 
 /** Initialize the wasm modules (idempotent). Resolve before `openCog`. */
 export declare function init(): Promise<unknown>;
@@ -84,8 +120,13 @@ export declare function init(): Promise<unknown>;
  */
 export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
 
-/** Encode a 256x256 RGBA buffer to PNG bytes (browser; uses OffscreenCanvas). */
-export declare function rgbaToPng(rgba: Uint8Array | Uint8ClampedArray): Promise<Uint8Array>;
+/** Encode an RGBA buffer to PNG bytes (browser; uses OffscreenCanvas).
+ *  Defaults to 256x256 when `width`/`height` are omitted. */
+export declare function rgbaToPng(
+  rgba: Uint8Array | Uint8ClampedArray,
+  width?: number,
+  height?: number,
+): Promise<Uint8Array>;
 
 /** Minimal shape of the maplibre-gl module needed to register a protocol. */
 export interface MapLibreLike {

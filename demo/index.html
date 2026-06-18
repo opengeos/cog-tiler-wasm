@@ -61,12 +61,7 @@
           value="0"
           style="width: 70px"
         />–<input id="max" type="number" value="1600" style="width: 70px" />
-        <select id="cmap">
-          <option selected>terrain</option>
-          <option>viridis</option>
-          <option>magma</option>
-          <option>gray</option>
-        </select>
+        <select id="cmap"></select>
         <button id="load">Load</button>
       </div>
       <small id="status"></small>
@@ -78,9 +73,20 @@
       // All COG tiling/warping/palette logic lives in the reusable module so
       // downstream apps can import it directly instead of copying this page.
       // `?v=__BUILD__` is rewritten to the commit SHA on deploy for cache-busting.
-      import { init, openCog, registerCogProtocol } from "./cog-tiler.js?v=__BUILD__";
+      import { init, openCog, registerCogProtocol, colormaps } from "./cog-tiler.js?v=__BUILD__";
 
       await init();
+
+      // Populate the colormap dropdown from the built-in list (default: terrain).
+      const cmapSel = document.getElementById("cmap");
+      cmapSel.replaceChildren(
+        ...colormaps().map((c) => {
+          const opt = document.createElement("option");
+          opt.value = opt.textContent = c;
+          if (c === "terrain") opt.selected = true;
+          return opt;
+        }),
+      );
 
       const status = (m) => (document.getElementById("status").textContent = m);
       const num = (id, fallback) => {
