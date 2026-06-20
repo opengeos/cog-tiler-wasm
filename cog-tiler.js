@@ -165,6 +165,43 @@ async function readTiffTag(img, name) {
   return undefined;
 }
 
+// Root keyword of a projected WKT (OGC `PROJCS`/`PROJCRS`, including the ESRI PE
+// string flavour ArcGIS writes). Matching the keyword lets us slice off any
+// `ESRI PE String = ` prefix.
+const PROJECTED_WKT_ROOT = /\b(?:PROJCS|PROJCRS)\s*\[/i;
+
+/** Pull a projected WKT/ESRI-PE-string definition out of a GeoTIFF citation geo
+ * key, if one is present. Returns the WKT from the `PROJCS`/`PROJCRS` keyword
+ * onward, or `null`. */
+function projectedWktFromGeoKeys(geoKeys) {
+  for (const citation of [geoKeys.PCSCitationGeoKey, geoKeys.GTCitationGeoKey]) {
+    if (typeof citation !== "string") continue;
+    const match = PROJECTED_WKT_ROOT.exec(citation);
+    if (match) return citation.slice(match.index);
+  }
+  return null;
+}
+
+/**
+ * Resolve the source CRS as a proj4 definition (a `+proj=...` string or a WKT).
+ *
+ * `geotiff-geokeys-to-proj4` builds the def from the numeric geo keys, but for a
+ * projection it cannot express (no `ProjCoordTransGeoKey`, e.g. ESRI world
+ * projections such as Mollweide/54009 written only as an `ESRI PE String`) it
+ * silently falls back to the bare geographic CRS (`+proj=longlat`, `isGCS`).
+ * That would place a projected raster at lon/lat where its metre coordinates
+ * are, so it never draws. When the keys carry a projected WKT, prefer it; proj4
+ * parses the ESRI/OGC WKT directly.
+ */
+function sourceCrsDef(geoKeys) {
+  const result = geokeysToProj4.toProj4(geoKeys);
+  if (result.isGCS) {
+    const wkt = projectedWktFromGeoKeys(geoKeys);
+    if (wkt) return wkt;
+  }
+  return result.proj4;
+}
+
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
 function buildPalette(colorMap) {
   if (!colorMap) return null;
@@ -282,7 +319,7 @@ export async function openCog(source) {
   }
 
   // Warp path: read the real source CRS + optional palette from the header.
-  const srcDef = geokeysToProj4.toProj4(img.getGeoKeys()).proj4;
+  const srcDef = sourceCrsDef(img.getGeoKeys());
   if (!srcDef) throw new Error("could not derive source CRS from GeoTIFF geokeys");
   const toSource = proj4("EPSG:3857", srcDef); // forward: mercator -> source
   const toLonLat = proj4(srcDef, "EPSG:4326"); // forward: source -> lon/lat
@@ -304,8 +341,18 @@ export async function openCog(source) {
     toSource,
     palette,
     boundsLonLat: [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)],
-    crsLabel: "warped from " + (srcDef.match(/\+proj=\w+/) || ["custom CRS"])[0],
+    crsLabel: "warped from " + crsLabelForDef(srcDef),
   });
+}
+
+/** A short label for a proj4 def: the `+proj=...` token, or the WKT's CRS name,
+ * falling back to "custom CRS". */
+function crsLabelForDef(srcDef) {
+  const projTag = srcDef.match(/\+proj=\w+/);
+  if (projTag) return projTag[0];
+  const wktName = srcDef.match(/\b(?:PROJCS|PROJCRS)\s*\[\s*"([^"]+)"/i);
+  if (wktName) return wktName[1];
+  return "custom CRS";
 }
 
 /** A single opened COG. Renders XYZ tiles via {@link CogSource#renderTileRGBA}. */
