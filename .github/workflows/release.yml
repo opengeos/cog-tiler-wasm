@@ -29,7 +29,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # npm@latest (12+) requires Node >= 22; keep this current or the
+          # Trusted Publishing npm upgrade below fails with EBADENGINE.
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
