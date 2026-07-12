@@ -240,18 +240,29 @@ function sampleWindowBilinear(buf, w, h, fc, fr) {
   return top + (bot - top) * ty;
 }
 
-// Build a byte reader from a URL string or an in-memory source (ArrayBuffer,
-// Uint8Array, or Blob/File). `range(a,b)` yields bytes [a..b]; `openTiff()`
+// Build a byte reader from a URL string, a Blob/File, or an in-memory source
+// (ArrayBuffer, Uint8Array). `range(a,b)` yields bytes [a..b]; `openTiff()`
 // returns a geotiff.js GeoTIFF for reading the CRS / color table from the header.
 async function makeReader(source) {
   if (typeof source === "string") {
     return { label: source, range: rangeFetcher(source), openTiff: () => GeoTIFF.fromUrl(source) };
   }
+  // Blob / File: read on demand via ranged slices, mirroring the URL path.
+  // Slurping the whole file (blob.arrayBuffer()) throws NotReadableError in
+  // Chromium for multi-GB rasters (e.g. the 7 GB GEBCO GeoTIFF) — and only the
+  // header prefix and the requested tiles are ever needed.
+  if (typeof Blob !== "undefined" && source instanceof Blob) {
+    return {
+      label: source.name || "(local file)",
+      range: async (a, b) => new Uint8Array(await source.slice(a, b + 1).arrayBuffer()),
+      openTiff: () => GeoTIFF.fromBlob(source),
+    };
+  }
   let bytes;
   if (source instanceof Uint8Array) bytes = source;
   else if (source instanceof ArrayBuffer) bytes = new Uint8Array(source);
   else if (source && typeof source.arrayBuffer === "function") {
-    bytes = new Uint8Array(await source.arrayBuffer()); // Blob / File
+    bytes = new Uint8Array(await source.arrayBuffer()); // exotic Blob-likes
   } else {
     throw new Error("openCog: expected a URL string, ArrayBuffer, Uint8Array, or Blob");
   }
@@ -270,10 +281,11 @@ async function makeReader(source) {
 
 /**
  * Open a COG and return a {@link CogSource} ready to render XYZ tiles. `source`
- * is a URL string (read via HTTP range) or in-memory bytes / a Blob / a File for
- * a local raster. Detects EPSG:3857 (fast path) vs. any other CRS (warp path),
- * reading the source projection + color table from the GeoTIFF header (which
- * whitebox-wasm 0.4.0 does not expose).
+ * is a URL string (read via HTTP range), a Blob / File (read via ranged slices,
+ * so multi-GB local rasters never load whole), or in-memory bytes. Detects
+ * EPSG:3857 (fast path) vs. any other CRS (warp path), reading the source
+ * projection + color table from the GeoTIFF header (which whitebox-wasm 0.4.0
+ * does not expose).
  */
 export async function openCog(source) {
   await init();

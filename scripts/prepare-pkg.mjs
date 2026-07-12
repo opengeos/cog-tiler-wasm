@@ -38,8 +38,8 @@ pkg.files = Array.from(
 
 // The high-level module needs these at runtime; consumers provide them.
 // geotiff accepts v2 or v3: only the stable high-level API (fromUrl,
-// fromArrayBuffer, getImage, getGeoKeys, readRasters) is used, which is
-// unchanged across the v3 major, so the range must not block v3 consumers.
+// fromBlob, fromArrayBuffer, getImage, getGeoKeys, readRasters) is used, which
+// is unchanged across the v3 major, so the range must not block v3 consumers.
 pkg.peerDependencies = {
   "whitebox-wasm": "^0.4.0",
   proj4: "^2.15.0",

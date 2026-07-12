@@ -124,8 +124,8 @@ export declare function init(): Promise<unknown>;
 
 /**
  * Open a COG and return a {@link CogSource} ready to render XYZ tiles. Pass a URL
- * string (read via HTTP range) or in-memory bytes / a Blob / a File for a local
- * raster.
+ * string (read via HTTP range), a Blob / File (read via ranged slices, so
+ * multi-GB local rasters never load whole), or in-memory bytes.
  */
 export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
 
