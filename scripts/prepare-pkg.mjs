@@ -41,7 +41,7 @@ pkg.files = Array.from(
 // fromBlob, fromArrayBuffer, getImage, getGeoKeys, readRasters) is used, which
 // is unchanged across the v3 major, so the range must not block v3 consumers.
 pkg.peerDependencies = {
-  "whitebox-wasm": "^0.4.0",
+  "whitebox-wasm": "^0.4.1",
   proj4: "^2.15.0",
   geotiff: "^2.1.0 || ^3.0.0",
   "geotiff-geokeys-to-proj4": "^2024.4.13",
