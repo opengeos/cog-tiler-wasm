@@ -395,8 +395,17 @@ fn sample_bilinear(data: &[f64], w: u32, h: u32, x: f64, y: f64, nodata: Option<
         Some(nd) => v.is_nan() || v == nd || (v - nd).abs() <= f64::EPSILON,
         None => v.is_nan(),
     };
-    if is_void(v00) || is_void(v10) || is_void(v01) || is_void(v11) {
+    // The anchor itself being void means the sample sits on nodata: stay
+    // transparent. A void *neighbour* only means the sample sits next to an
+    // edge, so fall back to nearest and hold the anchor's own valid value.
+    // Returning NaN there instead would erode a pixel of real data all the way
+    // around every nodata boundary, which for an ocean product means shaving the
+    // coastline off the data on each tile.
+    if is_void(v00) {
         return f64::NAN;
+    }
+    if is_void(v10) || is_void(v01) || is_void(v11) {
+        return v00;
     }
     let top = v00 + (v10 - v00) * fx;
     let bot = v01 + (v11 - v01) * fx;
@@ -422,7 +431,10 @@ mod sample_bilinear_tests {
             // -2500 / -5000 / -7500, which matched neither the sentinel nor NaN,
             // so it survived the caller's mask, clamped to the bottom of the
             // rescale window, and painted the colormap's first colour.
-            assert!(v.is_nan(), "x={x} must be masked, got {v}");
+            assert_eq!(
+                v, 2.5,
+                "x={x} must hold the valid value, not blend toward nodata"
+            );
         }
     }
 
@@ -441,10 +453,18 @@ mod sample_bilinear_tests {
     }
 
     #[test]
-    fn keeps_the_existing_nan_guard() {
+    fn falls_back_to_nearest_beside_a_nan_neighbour() {
         let data = [2.5, f64::NAN, 3.0, f64::NAN];
-        assert!(sample_bilinear(&data, 2, 2, 0.5, 0.0, Some(ND)).is_nan());
-        assert!(sample_bilinear(&data, 2, 2, 0.5, 0.0, None).is_nan());
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.0, Some(ND)), 2.5);
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.0, None), 2.5);
+    }
+
+    #[test]
+    fn stays_transparent_when_the_anchor_itself_is_void() {
+        // Sampling *on* nodata (rather than beside it) must not be rescued by
+        // the nearest fallback -- that pixel really has no data.
+        assert!(sample_bilinear(&[ND, 2.5, ND, 3.0], 2, 2, 0.0, 0.0, Some(ND)).is_nan());
+        assert!(sample_bilinear(&[f64::NAN, 2.5, f64::NAN, 3.0], 2, 2, 0.0, 0.0, None).is_nan());
     }
 
     #[test]
