@@ -11,6 +11,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: JS unit tests
+        run: npm test
+
       - name: Install Rust (wasm target)
         uses: dtolnay/rust-toolchain@stable
         with:

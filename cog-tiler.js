@@ -25,6 +25,7 @@ import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
+import { sampleWindowBilinear } from "./sampling.js";
 
 const OS = 20037508.342789244; // Web Mercator half-extent (m)
 const TILE = 256; // output tile size (px)
@@ -220,22 +221,6 @@ function bilin(v00, v10, v01, v11, tx, ty) {
   if (!isFinite(v00) || !isFinite(v10) || !isFinite(v01) || !isFinite(v11)) {
     return isFinite(v00) ? v00 : NaN; // near projection edges
   }
-  const top = v00 + (v10 - v00) * tx, bot = v01 + (v11 - v01) * tx;
-  return top + (bot - top) * ty;
-}
-
-// Bilinear sample of a row-major window at fractional (fc,fr). Returns NaN when
-// the cell center is outside the window so out-of-raster pixels stay transparent
-// (no edge smear); falls back to nearest at the window edge / next to nodata.
-function sampleWindowBilinear(buf, w, h, fc, fr) {
-  const c0 = Math.floor(fc), r0 = Math.floor(fr);
-  if (c0 < 0 || c0 >= w || r0 < 0 || r0 >= h) return NaN;
-  const c1 = Math.min(c0 + 1, w - 1), r1 = Math.min(r0 + 1, h - 1);
-  const v00 = buf[r0 * w + c0];
-  if (Number.isNaN(v00)) return NaN;
-  const v10 = buf[r0 * w + c1], v01 = buf[r1 * w + c0], v11 = buf[r1 * w + c1];
-  if (Number.isNaN(v10) || Number.isNaN(v01) || Number.isNaN(v11)) return v00; // edge/nodata
-  const tx = fc - c0, ty = fr - r0;
   const top = v00 + (v10 - v00) * tx, bot = v01 + (v11 - v01) * tx;
   return top + (bot - top) * ty;
 }
@@ -569,7 +554,7 @@ export class CogSource {
           // RGB composite: bilinear-sample each band, rescale -> curve -> gamma.
           let ok = true;
           for (let k = 0; k < 3; k++) {
-            const v = sampleWindowBilinear(bufs[k], ww, hh, fcol, frow);
+            const v = sampleWindowBilinear(bufs[k], ww, hh, fcol, frow, ndSet ? nodata : undefined);
             if (!isFinite(v) || (ndSet && v === nodata)) { ok = false; break; }
             const [mn, mx] = rescales[k] || rescales[0];
             const t = transferCurve(Math.max(0, Math.min(1, (v - mn) / ((mx - mn) || 1))), stretch, gamma);
@@ -579,7 +564,7 @@ export class CogSource {
           else { out[o] = out[o + 1] = out[o + 2] = 0; }
         } else {
           // Continuous single band: bilinear; colormap applied below.
-          const v = sampleWindowBilinear(bufs[0], ww, hh, fcol, frow);
+          const v = sampleWindowBilinear(bufs[0], ww, hh, fcol, frow, ndSet ? nodata : undefined);
           if (!isFinite(v) || (ndSet && v === nodata)) continue;
           grid[py * outW + px] = v;
         }
