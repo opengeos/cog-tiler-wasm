@@ -15,6 +15,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkgDir = process.argv[2] || join(root, "crates/cog-tiler-wasm/pkg");
 
 copyFileSync(join(root, "cog-tiler.js"), join(pkgDir, "cog-tiler.js"));
+copyFileSync(join(root, "sampling.js"), join(pkgDir, "sampling.js"));
 copyFileSync(join(root, "cog-tiler.d.ts"), join(pkgDir, "cog-tiler.d.ts"));
 copyFileSync(join(root, "README.md"), join(pkgDir, "README.md"));
 copyFileSync(join(root, "LICENSE"), join(pkgDir, "LICENSE"));
@@ -33,7 +34,14 @@ pkg.exports = {
   "./wasm": { types: "./cog_tiler_wasm.d.ts", default: "./cog_tiler_wasm.js" },
 };
 pkg.files = Array.from(
-  new Set([...(pkg.files || []), "cog-tiler.js", "cog-tiler.d.ts", "README.md", "LICENSE"]),
+  new Set([
+    ...(pkg.files || []),
+    "cog-tiler.js",
+    "sampling.js",
+    "cog-tiler.d.ts",
+    "README.md",
+    "LICENSE",
+  ]),
 );
 
 // The high-level module needs these at runtime; consumers provide them.

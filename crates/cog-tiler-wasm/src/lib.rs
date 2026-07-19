@@ -265,7 +265,14 @@ impl CogTiler {
             let sy = ((ty as f64 + 0.5) / ts) * win_h as f64 - 0.5;
             for tx in 0..TILE_SIZE {
                 let sx = ((tx as f64 + 0.5) / ts) * win_w as f64 - 0.5;
-                let v = sample_bilinear(&pixels, win_w, win_h, sx, sy);
+                // The sentinel is handed to the sampler, not just tested on its
+                // result: interpolating across a nodata boundary blends the
+                // sentinel into the value, and the blend equals neither the
+                // sentinel nor NaN, so the test below cannot recognise it. Only
+                // masked when `nodata_alpha` is set, so a caller that asked for
+                // nodata to be rendered as data still gets it interpolated.
+                let mask = if nodata_alpha { self.nodata } else { None };
+                let v = sample_bilinear(&pixels, win_w, win_h, sx, sy, mask);
 
                 let idx = ((ty * TILE_SIZE + tx) * 4) as usize;
                 let is_nodata = match self.nodata {
@@ -357,7 +364,16 @@ impl CogTiler {
 
 /// Bilinear sample of a row-major `f64` grid, clamping at the edges. Returns
 /// `NaN` if any contributing sample is `NaN` so nodata/edges stay transparent.
-fn sample_bilinear(data: &[f64], w: u32, h: u32, x: f64, y: f64) -> f64 {
+///
+/// `nodata` is the declared sentinel when it should be masked. A sentinel
+/// neighbour is treated exactly like a `NaN` one, because interpolating across
+/// the boundary would otherwise blend it into the result: the product matches
+/// neither the sentinel nor `NaN`, so the caller's equality test cannot catch
+/// it, and with a large negative sentinel (-9999 is the GDAL convention) it
+/// clamps to the bottom of the rescale window and paints a ring of the
+/// colormap's first colour around every nodata edge -- a blue border under
+/// `jet`.
+fn sample_bilinear(data: &[f64], w: u32, h: u32, x: f64, y: f64, nodata: Option<f64>) -> f64 {
     let w = w as i64;
     let h = h as i64;
     let x0 = x.floor() as i64;
@@ -374,10 +390,68 @@ fn sample_bilinear(data: &[f64], w: u32, h: u32, x: f64, y: f64) -> f64 {
     let v10 = at(x0 + 1, y0);
     let v01 = at(x0, y0 + 1);
     let v11 = at(x0 + 1, y0 + 1);
-    if v00.is_nan() || v10.is_nan() || v01.is_nan() || v11.is_nan() {
+    // Mirrors the caller's tolerance so the two agree on what counts as nodata.
+    let is_void = |v: f64| match nodata {
+        Some(nd) => v.is_nan() || v == nd || (v - nd).abs() <= f64::EPSILON,
+        None => v.is_nan(),
+    };
+    if is_void(v00) || is_void(v10) || is_void(v01) || is_void(v11) {
         return f64::NAN;
     }
     let top = v00 + (v10 - v00) * fx;
     let bot = v01 + (v11 - v01) * fx;
     top + (bot - top) * fy
+}
+
+#[cfg(test)]
+mod sample_bilinear_tests {
+    use super::sample_bilinear;
+
+    /// GDAL's conventional float sentinel, and the one the PACE chlorophyll
+    /// COGs that surfaced this bug declare.
+    const ND: f64 = -9999.0;
+
+    #[test]
+    fn does_not_blend_a_sentinel_into_a_neighbouring_value() {
+        // A land/water edge: left column valid chlorophyll, right column nodata.
+        let data = [2.5, ND, 3.0, ND];
+        for step in 0..4 {
+            let x = step as f64 * 0.25;
+            let v = sample_bilinear(&data, 2, 2, x, 0.0, Some(ND));
+            // Interpolating toward the sentinel used to drag this to roughly
+            // -2500 / -5000 / -7500, which matched neither the sentinel nor NaN,
+            // so it survived the caller's mask, clamped to the bottom of the
+            // rescale window, and painted the colormap's first colour.
+            assert!(v.is_nan(), "x={x} must be masked, got {v}");
+        }
+    }
+
+    #[test]
+    fn still_interpolates_when_no_sentinel_is_masked() {
+        let data = [0.0, 10.0, 0.0, 10.0];
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.0, None), 5.0);
+    }
+
+    #[test]
+    fn a_sentinel_value_is_ordinary_data_when_not_masked() {
+        // With nodata_alpha off the caller wants nodata rendered, so -9999 must
+        // interpolate like any other value.
+        let data = [0.0, -9999.0, 0.0, -9999.0];
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.0, None), -4999.5);
+    }
+
+    #[test]
+    fn keeps_the_existing_nan_guard() {
+        let data = [2.5, f64::NAN, 3.0, f64::NAN];
+        assert!(sample_bilinear(&data, 2, 2, 0.5, 0.0, Some(ND)).is_nan());
+        assert!(sample_bilinear(&data, 2, 2, 0.5, 0.0, None).is_nan());
+    }
+
+    #[test]
+    fn interpolates_across_an_interior_window_of_valid_data() {
+        let data = [0.0, 10.0, 20.0, 30.0];
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.0, Some(ND)), 5.0);
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.0, 0.5, Some(ND)), 10.0);
+        assert_eq!(sample_bilinear(&data, 2, 2, 0.5, 0.5, Some(ND)), 15.0);
+    }
 }
