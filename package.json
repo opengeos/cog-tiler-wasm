@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Dev scripts for the cog-tiler-wasm demo (the published package is assembled under crates/cog-tiler-wasm/pkg).",
   "scripts": {
+    "gen:colormaps": "node scripts/gen-colormaps.mjs",
     "build:wasm": "wasm-pack build crates/cog-tiler-wasm --release --target web --out-dir ../../demo",
     "assemble:demo": "node scripts/assemble-demo.mjs",
     "predev": "npm run build:wasm && npm run assemble:demo",
