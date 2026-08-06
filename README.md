@@ -110,6 +110,24 @@ map.addLayer({ id: "cog", type: "raster", source: "cog" });
 // and source.renderTileRGBA(z, x, y, render) / renderTilePNG(...) are also exposed.
 ```
 
+### Plain GeoTIFFs (not only COGs)
+
+`openCog` also opens a **plain** GeoTIFF - what GDAL and libtiff write unless
+you ask for a COG. Their difference is where the directory sits: a COG keeps
+every IFD at the front of the file, while a plain GeoTIFF puts it *after* the
+pixel data, so growing a front-of-file prefix would have to pull in the whole
+file to reach it. The header is instead read from a window around the directory
+(a 74 MB raster needs 704 KB of it).
+
+Two things still make a COG the better input:
+
+- **No overviews.** A plain GeoTIFF usually has only full resolution, so a
+  zoomed-out tile would have to read the entire image. Past a read ceiling of
+  ~16.8M source samples those tiles render **blank** and the reason is logged
+  once - the raster still opens, and zooming in brings it back. Run `gdaladdo`,
+  or convert to a COG, to see it at every zoom.
+- **No tile index at the front**, so opening costs a second range request.
+
 ### TiTiler-style COG API
 
 `CogSource` mirrors the read endpoints of

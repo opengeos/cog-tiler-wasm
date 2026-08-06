@@ -20,17 +20,38 @@
  *   registerCogProtocol(maplibregl, "cog", () => ({ source: src, render: { min, max, colormap } }));
  *   map.addSource("cog", { type: "raster", tiles: ["cog://{z}/{x}/{y}"], tileSize: 256 });
  */
-import initWhitebox, { CogStream } from "whitebox-wasm";
+import initWhitebox, { CogStream, first_ifd_offset } from "whitebox-wasm";
 import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
 import { sampleWindowBilinear } from "./sampling.js";
+import {
+  HEADER_PREFIX,
+  HEADER_TAIL,
+  MAX_HEADER_PREFIX,
+  MAX_HEADER_TAIL,
+  widenHeaderWindow,
+} from "./header-window.js";
+
+export { widenHeaderWindow } from "./header-window.js";
 
 const OS = 20037508.342789244; // Web Mercator half-extent (m)
 const TILE = 256; // output tile size (px)
 const NG = 16; // warp grid cells per axis
 const MAX_CACHED_TILES = 256; // ~0.5 MB each at 256x256 f64
+
+// Offset named by whitebox-wasm when header parsing walks past the bytes it was
+// handed. Tied to that package's error text through the peer-dependency range.
+const NEEDS_OFFSET = /need more header bytes at offset (\d+)/;
+
+// Ceiling on one read: source pixels x bands, each materialized as an f64
+// (1 << 24 samples ≈ 134 MB). Overview levels normally keep a read far under
+// this. A raster with *no* overviews has only full resolution to read from, so
+// a zoomed-out view would ask for the entire image — 45 GB of buffer and every
+// tile in the file for the raster in GeoLibre#1743. Refusing is what keeps the
+// tab alive; zooming in narrows the window until it fits.
+const MAX_WINDOW_SAMPLES = 1 << 24;
 
 proj4.defs(
   "EPSG:3857",
@@ -50,8 +71,10 @@ function tileBounds3857(z, x, y) {
   return [-OS + x * span, OS - (y + 1) * span, -OS + (x + 1) * span, OS - y * span];
 }
 
+// `b` may be null, meaning "to the end of the file" — used to pull in a
+// trailing TIFF directory without first having to learn the file's length.
 const rangeFetcher = (url) => (a, b) =>
-  fetch(url, { headers: { Range: `bytes=${a}-${b}` } })
+  fetch(url, { headers: { Range: `bytes=${a}-${b ?? ""}` } })
     .then((r) => r.arrayBuffer())
     .then((b) => new Uint8Array(b));
 
@@ -239,7 +262,8 @@ async function makeReader(source) {
   if (typeof Blob !== "undefined" && source instanceof Blob) {
     return {
       label: source.name || "(local file)",
-      range: async (a, b) => new Uint8Array(await source.slice(a, b + 1).arrayBuffer()),
+      range: async (a, b) =>
+        new Uint8Array(await (b == null ? source.slice(a) : source.slice(a, b + 1)).arrayBuffer()),
       openTiff: () => GeoTIFF.fromBlob(source),
     };
   }
@@ -259,9 +283,54 @@ async function makeReader(source) {
       : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return {
     label: source.name || "(local file)",
-    range: (a, b) => Promise.resolve(bytes.subarray(a, Math.min(b + 1, bytes.length))),
+    range: (a, b) =>
+      Promise.resolve(bytes.subarray(a, b == null ? bytes.length : Math.min(b + 1, bytes.length))),
     openTiff: () => GeoTIFF.fromArrayBuffer(ab),
   };
+}
+
+/**
+ * Parse the TIFF header, wherever the directory happens to live.
+ *
+ * A Cloud Optimized GeoTIFF keeps every IFD at the front of the file, so the
+ * first 64 KB usually has it; grow the prefix for one with many overviews or a
+ * huge tile-offset array. A **plain** GeoTIFF, which is what GDAL and libtiff
+ * write unless asked for a COG, puts the directory *after* the pixel data,
+ * where no front prefix short of the whole file can reach it. Read where the
+ * directory actually is and pull in that region as a second window instead
+ * (GeoLibre#1743: a 74 MB raster needs 704 KB of it, not 74 MB).
+ */
+async function openHeader(range) {
+  const prefix = await range(0, HEADER_PREFIX - 1);
+  const ifd = first_ifd_offset(prefix); // throws if this is not a TIFF at all
+  if (ifd < prefix.length) {
+    for (let len = HEADER_PREFIX; ; len *= 8) {
+      try {
+        return new CogStream(len === HEADER_PREFIX ? prefix : await range(0, len - 1));
+      } catch (e) {
+        if (len >= MAX_HEADER_PREFIX) throw e;
+      }
+    }
+  }
+  // Widen a window around the directory until the parse lands.
+  let start = ifd,
+    end = ifd + HEADER_TAIL,
+    covered = 0;
+  for (;;) {
+    const tail = await range(start, end - 1);
+    try {
+      return CogStream.from_windows(prefix, start, tail);
+    } catch (e) {
+      const want = Number(NEEDS_OFFSET.exec(String(e))?.[1]);
+      const next = widenHeaderWindow(start, end, want);
+      // Retry only a miss we can act on, that we can still afford, and where the
+      // last fetch actually brought back more of the file (past the end, it does
+      // not, and growing the window forever would never fix that).
+      if (!next || tail.length <= covered || next.end - next.start > MAX_HEADER_TAIL) throw e;
+      covered = tail.length;
+      ({ start, end } = next);
+    }
+  }
 }
 
 /**
@@ -275,17 +344,7 @@ async function makeReader(source) {
 export async function openCog(source) {
   await init();
   const { range, openTiff, label } = await makeReader(source);
-  // Parse the COG header; grow the prefix and retry for large COGs whose IFDs
-  // exceed 64 KB (many overviews / huge tile-offset arrays).
-  let stream;
-  for (let len = 65536; ; len *= 8) {
-    try {
-      stream = new CogStream(await range(0, len - 1));
-      break;
-    } catch (e) {
-      if (len >= 1 << 25) throw e; // give up past ~32 MB
-    }
-  }
+  const stream = await openHeader(range);
   const gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
   const levels = JSON.parse(stream.levels_json());
   if (!Array.isArray(levels) || levels.length === 0) {
@@ -413,6 +472,14 @@ export class CogSource {
   // planar (INTERLEAVE=BAND) COGs are read per-band via geotiff.js, which
   // whitebox's chunky-only streaming decoder can't address.
   async _assembleWindow(level, x, y, w, h, band = 0) {
+    if (w * h > MAX_WINDOW_SAMPLES) {
+      throw new Error(
+        `window ${w}x${h} on level ${level} is too large to read (limit ${MAX_WINDOW_SAMPLES} samples)` +
+          (this.levels.length === 1
+            ? "; this raster has no overviews, so add them (gdaladdo, or convert to a COG) or read a smaller area"
+            : ""),
+      );
+    }
     if (this.planar) {
       const img = await this._tiffImage(level);
       const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
@@ -437,6 +504,22 @@ export class CogSource {
       }
     });
     return buf;
+  }
+
+  // Say once, per source, why a zoomed-out view is blank. Repeating it for
+  // every tile in the viewport would bury the one thing worth reading.
+  _warnUnrenderable(ww, hh) {
+    if (this._warnedUnrenderable) return;
+    this._warnedUnrenderable = true;
+    const l0 = this.levels[0];
+    console.warn(
+      `cog-tiler: ${this.url} needs a ${ww}x${hh} source read at this zoom, over the ` +
+        `${MAX_WINDOW_SAMPLES}-sample limit, so nothing is drawn. ` +
+        (this.levels.length === 1
+          ? `This ${l0.width}x${l0.height} raster has no overviews: add them (gdaladdo, ` +
+            `or convert it to a COG) to see it zoomed out, or zoom in.`
+          : "Zoom in, or add coarser overviews."),
+    );
   }
 
   // Choose the overview whose source resolution is the coarsest still finer than
@@ -522,6 +605,13 @@ export class CogSource {
 
     // Assemble the needed band window(s): 1 (palette/colormap) or 3 (RGB).
     const used = rgb ? bands0.slice(0, 3) : [bands0[0]];
+    // Draw nothing rather than throw per tile: an overview-less raster is
+    // simply not renderable this far out, and MapLibre asks for a whole
+    // screenful of tiles at once. `warnUnrenderable` says so once.
+    if (ww * hh * used.length > MAX_WINDOW_SAMPLES) {
+      this._warnUnrenderable(ww, hh);
+      return null;
+    }
     const bufs = await Promise.all(used.map((b) => this._assembleWindow(level, c0, r0, ww, hh, b)));
     const pal = this.palette;
 
