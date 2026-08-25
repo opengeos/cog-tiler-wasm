@@ -103,7 +103,7 @@ pub fn colorize(
     let inv = if range != 0.0 { 1.0 / range } else { 0.0 };
     let nd = nodata.filter(|v| !v.is_nan());
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-    for (chunk, &v) in out.chunks_exact_mut(4).zip(pixels.iter()) {
+    for (chunk, &v) in out.as_chunks_mut::<4>().0.iter_mut().zip(pixels.iter()) {
         let is_nd = matches!(nd, Some(x) if v == x || (v - x).abs() <= f64::EPSILON);
         if v.is_nan() || (is_nd && nodata_alpha) {
             continue; // transparent
