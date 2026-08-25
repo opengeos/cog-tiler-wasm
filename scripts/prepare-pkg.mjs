@@ -52,7 +52,7 @@ pkg.peerDependencies = {
   "whitebox-wasm": "^0.4.1",
   proj4: "^2.15.0",
   geotiff: "^2.1.0 || ^3.0.0",
-  "geotiff-geokeys-to-proj4": "^2024.4.13",
+  "geotiff-geokeys-to-proj4": "^2024.4.13 || ^2026.8.16",
 };
 pkg.keywords = [
   "cog", "geotiff", "tiler", "webassembly", "wasm",
