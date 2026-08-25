@@ -275,6 +275,11 @@ async function makeReader(source) {
 export async function openCog(source) {
   await init();
   const { range, openTiff, label } = await makeReader(source);
+  // whitebox-wasm's streaming decoder currently materializes numeric tile
+  // samples as little-endian. Detect Motorola TIFFs up front so their pixels
+  // can be decoded by geotiff.js, which honors the header byte order.
+  const byteOrder = await range(0, 1);
+  const bigEndian = byteOrder[0] === 0x4d && byteOrder[1] === 0x4d;
   // Parse the COG header; grow the prefix and retry for large COGs whose IFDs
   // exceed 64 KB (many overviews / huge tile-offset arrays).
   let stream;
@@ -286,7 +291,7 @@ export async function openCog(source) {
       if (len >= 1 << 25) throw e; // give up past ~32 MB
     }
   }
-  const gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
+  let gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
   const levels = JSON.parse(stream.levels_json());
   if (!Array.isArray(levels) || levels.length === 0) {
     throw new Error("levels_json() returned no levels");
@@ -297,12 +302,27 @@ export async function openCog(source) {
   // through geotiff.js instead (see _assembleWindow / point).
   const multiBand = levels[0].bands > 1;
   let tiff = null, img = null, planar = false;
-  if (stream.epsg !== 3857 || multiBand) {
+  if (stream.epsg !== 3857 || multiBand || bigEndian) {
     tiff = await openTiff();
     img = await tiff.getImage();
     planar = multiBand && (await readTiffTag(img, "PlanarConfiguration")) === 2;
+    if (bigEndian && gt.length !== 6) {
+      const [x, y] = img.getOrigin();
+      const [pixelWidth, pixelHeight] = img.getResolution();
+      gt = [x, pixelWidth, 0, y, 0, -pixelHeight];
+    }
   }
-  const base = { url: label, range, stream, levels, gt, nodata: stream.nodata, tiff, planar };
+  const base = {
+    url: label,
+    range,
+    stream,
+    levels,
+    gt,
+    nodata: stream.nodata,
+    tiff,
+    planar,
+    bigEndian,
+  };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -410,10 +430,11 @@ export class CogSource {
 
   // Fetch + decode band `band` (0-based) over a level pixel window into a
   // row-major buffer. Chunky COGs go through whitebox (cached, NaN for gaps);
-  // planar (INTERLEAVE=BAND) COGs are read per-band via geotiff.js, which
-  // whitebox's chunky-only streaming decoder can't address.
+  // Planar (INTERLEAVE=BAND) and big-endian COGs are read per-band via
+  // geotiff.js. Whitebox's streaming decoder cannot address planar tiles and
+  // currently interprets multi-byte tile samples as little-endian.
   async _assembleWindow(level, x, y, w, h, band = 0) {
-    if (this.planar) {
+    if (this.planar || this.bigEndian) {
       const img = await this._tiffImage(level);
       const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
       return rasters[0]; // typed array, length w*h, row-major
