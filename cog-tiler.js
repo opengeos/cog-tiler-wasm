@@ -26,6 +26,7 @@ import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
 import { sampleWindowBilinear } from "./sampling.js";
+import { computeStats } from "./statistics.js";
 
 const OS = 20037508.342789244; // Web Mercator half-extent (m)
 const TILE = 256; // output tile size (px)
@@ -63,44 +64,6 @@ function dtypeOf(lv) {
   if (f === "uint" || f.includes("unsigned")) return "uint" + b;
   if (f === "int" || f.includes("signed")) return "int" + b;
   return (f || "uint") + b;
-}
-
-/** Min/max/mean/std/count/valid_percent/percentiles/histogram for a band buffer. */
-function computeStats(buf, nodata) {
-  let min = Infinity, max = -Infinity, sum = 0, sumsq = 0;
-  const valid = [];
-  for (let i = 0; i < buf.length; i++) {
-    const v = buf[i];
-    if (Number.isNaN(v)) continue;
-    if (nodata != null && v === nodata) continue;
-    if (v < min) min = v;
-    if (v > max) max = v;
-    sum += v;
-    sumsq += v * v;
-    valid.push(v);
-  }
-  const count = valid.length;
-  if (count === 0) return { count: 0, valid_percent: 0 };
-  const mean = sum / count;
-  const std = Math.sqrt(Math.max(0, sumsq / count - mean * mean));
-  valid.sort((a, b) => a - b);
-  const pct = (p) => valid[Math.min(count - 1, Math.floor((p / 100) * count))];
-  const bins = 10, span = max - min || 1, hist = new Array(bins).fill(0);
-  for (const v of valid) {
-    let k = Math.floor(((v - min) / span) * bins);
-    if (k >= bins) k = bins - 1;
-    if (k < 0) k = 0;
-    hist[k]++;
-  }
-  const edges = Array.from({ length: bins + 1 }, (_, i) => min + (span * i) / bins);
-  return {
-    min, max, mean, std, count,
-    valid_percent: (count / buf.length) * 100,
-    median: pct(50),
-    percentile_2: pct(2),
-    percentile_98: pct(98),
-    histogram: [hist, edges],
-  };
 }
 
 /** Transfer curve for a rescaled value in 0..1: stretch then gamma (mirrors the
