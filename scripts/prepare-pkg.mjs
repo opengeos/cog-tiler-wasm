@@ -16,6 +16,7 @@ const pkgDir = process.argv[2] || join(root, "crates/cog-tiler-wasm/pkg");
 
 copyFileSync(join(root, "cog-tiler.js"), join(pkgDir, "cog-tiler.js"));
 copyFileSync(join(root, "sampling.js"), join(pkgDir, "sampling.js"));
+copyFileSync(join(root, "statistics.js"), join(pkgDir, "statistics.js"));
 copyFileSync(join(root, "cog-tiler.d.ts"), join(pkgDir, "cog-tiler.d.ts"));
 copyFileSync(join(root, "README.md"), join(pkgDir, "README.md"));
 copyFileSync(join(root, "LICENSE"), join(pkgDir, "LICENSE"));
@@ -38,6 +39,7 @@ pkg.files = Array.from(
     ...(pkg.files || []),
     "cog-tiler.js",
     "sampling.js",
+    "statistics.js",
     "cog-tiler.d.ts",
     "README.md",
     "LICENSE",
