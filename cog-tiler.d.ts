@@ -71,7 +71,12 @@ export declare class CogSource {
   levelReadsViaGeoTiff(level: number): boolean;
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. (Paletted
    * tiles are a `Uint8ClampedArray`; continuous tiles are the wasm `render()`
-   * `Uint8Array`.) */
+   * `Uint8Array`.)
+   *
+   * Also null when the tile would need more source pixels than one read allows,
+   * which happens on a large raster with no overviews: full resolution is the
+   * only thing there is to read, so a zoomed-out tile would pull in the whole
+   * image. Zooming in shrinks the window until it fits. */
   renderTileRGBA(
     z: number,
     x: number,
@@ -133,8 +138,25 @@ export declare function init(): Promise<unknown>;
  * Open a COG and return a {@link CogSource} ready to render XYZ tiles. Pass a URL
  * string (read via HTTP range), a Blob / File (read via ranged slices, so
  * multi-GB local rasters never load whole), or in-memory bytes.
+ *
+ * Plain (non-COG) GeoTIFFs open too: their directory sits after the pixel data
+ * rather than at the front, and it is read from there. They usually carry no
+ * overviews, though, so a zoomed-out view of a very large one renders blank
+ * rather than reading the whole raster — see {@link CogSource.renderTileRGBA}.
  */
 export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
+
+/**
+ * Widen the byte window `[start, end)` so it covers `want`, the offset a header
+ * parse said it still needed, growing in whichever direction the miss lies.
+ * Returns `null` when `want` already falls inside the window.
+ */
+export declare function widenHeaderWindow(
+  start: number,
+  end: number,
+  want: number,
+  pad?: number,
+): { start: number; end: number } | null;
 
 /**
  * Which decoder reads tiles in a given compression, as reported by
