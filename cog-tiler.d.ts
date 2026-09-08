@@ -62,6 +62,13 @@ export declare class CogSource {
   readonly boundsLonLat: number[];
   /** True when the band is paletted (categorical) and rendered via its table. */
   readonly hasPalette: boolean;
+  /** True when some level's pixels are read through geotiff.js rather than
+   * the wasm streaming decoder: planar layouts, big-endian samples, and codecs
+   * the wasm decoder lacks (LERC, ZSTD). */
+  readonly readsViaGeoTiff: boolean;
+  /** Whether `level` is read through geotiff.js. Overviews may be compressed
+   * differently from the base image (GDAL's OVERVIEW_COMPRESS). */
+  levelReadsViaGeoTiff(level: number): boolean;
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. (Paletted
    * tiles are a `Uint8ClampedArray`; continuous tiles are the wasm `render()`
    * `Uint8Array`.) */
@@ -128,6 +135,36 @@ export declare function init(): Promise<unknown>;
  * multi-GB local rasters never load whole), or in-memory bytes.
  */
 export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob): Promise<CogSource>;
+
+/**
+ * Which decoder reads tiles in a given compression, as reported by
+ * `LevelInfo.compression`: `"wasm"` (whitebox-wasm), `"geotiff"` (geotiff.js,
+ * used for LERC and ZSTD), or `null` when neither can. `openCog` rejects with
+ * {@link unsupportedCompressionMessage} for the `null` case. `directZstd`
+ * (default true) says whether the installed geotiff.js registers TIFF code
+ * 50000: 3.x does, 2.x does not.
+ */
+export declare function compressionDecoder(
+  compression: string | undefined,
+  options?: { directZstd?: boolean },
+): "wasm" | "geotiff" | null;
+/** Parse a `LevelInfo.compression` string into its TIFF code and a readable name. */
+export declare function parseCompression(compression: string | undefined): { code: number | null; name: string };
+/** The message `openCog` rejects with for a codec no decoder handles. */
+export declare function unsupportedCompressionMessage(
+  compression: string | undefined,
+  options?: { directZstd?: boolean },
+): string;
+
+/**
+ * Where lerc's `lerc-wasm.wasm` is served from, for the mask-aware LERC
+ * decoder. lerc resolves it relative to its own module URL, which bundlers
+ * that hash assets or pre-bundle dependencies do not always rewrite; pass the
+ * URL your bundler resolves for the asset (Vite:
+ * `import lercWasmUrl from "lerc/lerc-wasm.wasm?url"`). Call before the first
+ * LERC COG opens. `null`/omitted restores lerc's own resolution.
+ */
+export declare function configureLercDecoder(options?: { wasmUrl?: string | URL | null }): void;
 
 /** Encode an RGBA buffer to PNG bytes (browser; uses OffscreenCanvas).
  *  Defaults to 256x256 when `width`/`height` are omitted. */
