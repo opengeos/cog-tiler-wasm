@@ -45,6 +45,13 @@ proj4.defs(
 );
 
 let _ready = null;
+const warned = new Set();
+function warnOnce(key, message) {
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(message);
+}
+
 /** Initialize the wasm modules (idempotent). Resolve this before `openCog`. */
 export function init() {
   if (!_ready) _ready = Promise.all([initWhitebox(), initTiler()]);
@@ -270,10 +277,15 @@ export async function openCog(source) {
   // failure only yields transparent tiles and a silently blank map. Every
   // level is checked because GDAL can compress overviews differently from the
   // base image (OVERVIEW_COMPRESS), so the decoder is chosen per level.
-  const decoders = levels.map((lv) => compressionDecoder(lv.compression));
+  // geotiff.js 3.x registers direct ZSTD (50000) and hands decoders typed
+  // parameters (which the mask-aware LERC decoder relies on); 2.x does
+  // neither. 3.x is the major that started exporting ImageFileDirectory.
+  const geotiffV3 = typeof GeoTIFF.ImageFileDirectory === "function";
+  const codecOptions = { directZstd: geotiffV3 };
+  const decoders = levels.map((lv) => compressionDecoder(lv.compression, codecOptions));
   const unsupported = decoders.indexOf(null);
   if (unsupported >= 0) {
-    throw new Error(unsupportedCompressionMessage(levels[unsupported].compression));
+    throw new Error(unsupportedCompressionMessage(levels[unsupported].compression, codecOptions));
   }
   // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857), to check
   // the planar config (multi-band), or to decode tiles of some level.
@@ -283,9 +295,12 @@ export async function openCog(source) {
   const multiBand = levels[0].bands > 1;
   const geotiffCodec = decoders.some((d) => d === "geotiff");
   // geotiff.js's own LERC decoder drops the validity mask (nodata reads as 0);
-  // swap in the mask-aware one before the first tile is decoded.
+  // swap in the mask-aware one before the first tile is decoded. It targets
+  // the 3.x decoder contract, so on 2.x the built-in decoder stays (LERC still
+  // renders, masked pixels read as 0).
   if (levels.some((lv) => parseCompression(lv.compression).code === LERC_COMPRESSION)) {
-    await registerMaskedLercDecoder();
+    if (geotiffV3) await registerMaskedLercDecoder();
+    else warnOnce("lerc-mask-v2", "[cog-tiler] geotiff.js 2.x: LERC validity mask not applied; upgrade to geotiff 3.x for correct nodata.");
   }
   let tiff = null, img = null, planar = false;
   if (stream.epsg !== 3857 || multiBand || bigEndian || geotiffCodec) {

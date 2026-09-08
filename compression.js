@@ -24,11 +24,13 @@ const TIFF_CODE = {
 const WASM_VARIANTS = new Set(["None", "Lzw", "Deflate", "PackBits", "OldJpeg", "Jpeg", "WebP", "JpegXl"]);
 
 /**
- * Codecs geotiff.js decodes (by TIFF code), per its compression registry. The
- * whole peer range qualifies: LERC (34887) since 2.0.0 (via `lerc`) and ZSTD
- * (50000) since 2.1.0 (via `zstddec`), the floor of the declared range.
+ * Codecs geotiff.js decodes (by TIFF code), per its compression registry.
+ * LERC (34887) is registered in every supported geotiff major; direct ZSTD
+ * (50000) only from 3.0.0 (2.x pulls `zstddec` in solely for LERC_ZSTD), so
+ * callers pass `directZstd: false` when the installed geotiff is 2.x.
  */
 const GEOTIFF_CODES = new Set([1, 5, 6, 7, 8, 32946, 32773, 34887, 50000, 50001]);
+const ZSTD_CODE = 50000;
 
 /** Human-readable names for TIFF compression codes seen in the wild. */
 const CODE_NAMES = new Map([
@@ -77,18 +79,24 @@ export function parseCompression(compression) {
  * Which decoder can read tiles in this compression: `"wasm"` (whitebox-wasm,
  * the default streaming path), `"geotiff"` (geotiff.js, used for codecs the
  * wasm decoder lacks such as LERC and ZSTD), or `null` when neither can.
+ * `directZstd` says whether the installed geotiff.js registers TIFF code
+ * 50000 (3.x does, 2.x does not).
  */
-export function compressionDecoder(compression) {
+export function compressionDecoder(compression, { directZstd = true } = {}) {
   const s = String(compression ?? "").trim();
   if (WASM_VARIANTS.has(s)) return "wasm";
   const { code } = parseCompression(s);
+  if (code === ZSTD_CODE && !directZstd) return null;
   if (code !== null && GEOTIFF_CODES.has(code)) return "geotiff";
   return null;
 }
 
 /** The error message `openCog` rejects with for a codec no decoder handles. */
-export function unsupportedCompressionMessage(compression) {
+export function unsupportedCompressionMessage(compression, { directZstd = true } = {}) {
   const { code, name } = parseCompression(compression);
   const label = code === null || !CODE_NAMES.has(code) ? name : `${name} (TIFF compression ${code})`;
+  if (code === ZSTD_CODE && !directZstd) {
+    return `Unsupported compression: ${label}. Decoding ZSTD tiles needs geotiff.js 3.x; this app ships an older geotiff.js.`;
+  }
   return `Unsupported compression: ${label}. This COG cannot be decoded in the browser; re-encode it with DEFLATE, ZSTD, LERC, LZW, or WebP.`;
 }

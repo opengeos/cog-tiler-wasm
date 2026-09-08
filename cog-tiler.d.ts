@@ -140,13 +140,21 @@ export declare function openCog(source: string | ArrayBuffer | Uint8Array | Blob
  * Which decoder reads tiles in a given compression, as reported by
  * `LevelInfo.compression`: `"wasm"` (whitebox-wasm), `"geotiff"` (geotiff.js,
  * used for LERC and ZSTD), or `null` when neither can. `openCog` rejects with
- * {@link unsupportedCompressionMessage} for the `null` case.
+ * {@link unsupportedCompressionMessage} for the `null` case. `directZstd`
+ * (default true) says whether the installed geotiff.js registers TIFF code
+ * 50000: 3.x does, 2.x does not.
  */
-export declare function compressionDecoder(compression: string | undefined): "wasm" | "geotiff" | null;
+export declare function compressionDecoder(
+  compression: string | undefined,
+  options?: { directZstd?: boolean },
+): "wasm" | "geotiff" | null;
 /** Parse a `LevelInfo.compression` string into its TIFF code and a readable name. */
 export declare function parseCompression(compression: string | undefined): { code: number | null; name: string };
 /** The message `openCog` rejects with for a codec no decoder handles. */
-export declare function unsupportedCompressionMessage(compression: string | undefined): string;
+export declare function unsupportedCompressionMessage(
+  compression: string | undefined,
+  options?: { directZstd?: boolean },
+): string;
 
 /**
  * Where lerc's `lerc-wasm.wasm` is served from, for the mask-aware LERC

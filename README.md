@@ -211,7 +211,12 @@ in all three `LERC`/`LERC_DEFLATE`/`LERC_ZSTD` modes, and ZSTD). `openCog`
 picks the decoder from the header and **rejects** a COG whose compression
 neither can read (LZMA, JPEG 2000, CCITT, ...), so hosts can show the error
 instead of a silently blank layer. `compressionDecoder(levelInfo.compression)`
-exposes the same decision.
+exposes the same decision. Overviews may use a different codec than the base
+image (GDAL's `OVERVIEW_COMPRESS`); the decision is made per level.
+
+With geotiff.js 2.x, direct ZSTD is rejected at open (2.x has no decoder for
+TIFF code 50000) and LERC renders without its validity mask; geotiff.js 3.x
+supports both fully.
 
 LERC tiles carry a validity mask that geotiff.js's built-in decoder discards
 (nodata pixels would read as 0). `openCog` registers a mask-aware replacement

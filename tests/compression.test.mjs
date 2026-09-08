@@ -48,3 +48,12 @@ test('the unsupported message names the codec and its TIFF code', () => {
   // does not map yet (it only knows 50002).
   assert.match(unsupportedCompressionMessage('Other(52546)'), /JPEG-XL \(DNG 1.7 code\) \(TIFF compression 52546\)/);
 });
+
+test('direct ZSTD is only routed to geotiff.js when the installed major registers it', () => {
+  // geotiff 2.x has zstddec for LERC_ZSTD only; TIFF code 50000 arrived in 3.0.0.
+  assert.equal(compressionDecoder('Other(50000)', { directZstd: false }), null);
+  assert.equal(compressionDecoder('Other(50000)', { directZstd: true }), 'geotiff');
+  assert.equal(compressionDecoder('Other(34887)', { directZstd: false }), 'geotiff'); // LERC unaffected
+  assert.match(unsupportedCompressionMessage('Other(50000)', { directZstd: false }), /needs geotiff\.js 3\.x/);
+  assert.doesNotMatch(unsupportedCompressionMessage('Other(34925)', { directZstd: false }), /geotiff/);
+});
