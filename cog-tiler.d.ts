@@ -62,10 +62,13 @@ export declare class CogSource {
   readonly boundsLonLat: number[];
   /** True when the band is paletted (categorical) and rendered via its table. */
   readonly hasPalette: boolean;
-  /** True when pixels are read through geotiff.js rather than the wasm
-   * streaming decoder: planar layouts, big-endian samples, and codecs the
-   * wasm decoder lacks (LERC, ZSTD). */
+  /** True when some level's pixels are read through geotiff.js rather than
+   * the wasm streaming decoder: planar layouts, big-endian samples, and codecs
+   * the wasm decoder lacks (LERC, ZSTD). */
   readonly readsViaGeoTiff: boolean;
+  /** Whether `level` is read through geotiff.js. Overviews may be compressed
+   * differently from the base image (GDAL's OVERVIEW_COMPRESS). */
+  levelReadsViaGeoTiff(level: number): boolean;
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. (Paletted
    * tiles are a `Uint8ClampedArray`; continuous tiles are the wasm `render()`
    * `Uint8Array`.) */

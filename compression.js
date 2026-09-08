@@ -23,7 +23,11 @@ const TIFF_CODE = {
 /** Codecs whitebox-wasm's streaming decoder decompresses (by variant name). */
 const WASM_VARIANTS = new Set(["None", "Lzw", "Deflate", "PackBits", "OldJpeg", "Jpeg", "WebP", "JpegXl"]);
 
-/** Codecs geotiff.js decodes (by TIFF code), per its compression registry. */
+/**
+ * Codecs geotiff.js decodes (by TIFF code), per its compression registry. The
+ * whole peer range qualifies: LERC (34887) since 2.0.0 (via `lerc`) and ZSTD
+ * (50000) since 2.1.0 (via `zstddec`), the floor of the declared range.
+ */
 const GEOTIFF_CODES = new Set([1, 5, 6, 7, 8, 32946, 32773, 34887, 50000, 50001]);
 
 /** Human-readable names for TIFF compression codes seen in the wild. */
