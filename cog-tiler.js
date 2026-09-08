@@ -25,6 +25,10 @@ import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
+import { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
+import { LERC_COMPRESSION, registerMaskedLercDecoder } from "./lerc-decoder.js";
+
+export { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { sampleWindowBilinear } from "./sampling.js";
 import { computeStats } from "./statistics.js";
 
@@ -259,13 +263,25 @@ export async function openCog(source) {
   if (!Array.isArray(levels) || levels.length === 0) {
     throw new Error("levels_json() returned no levels");
   }
-  // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857) or to check
-  // the planar config (multi-band). whitebox-wasm's streaming decoder is
-  // chunky-only, so planar (INTERLEAVE=BAND) multi-band COGs are read per-band
+  // Fail at open time, not tile by tile, when no decoder can read the codec:
+  // hosts surface an openCog rejection as a layer error, whereas a tile decode
+  // failure only yields transparent tiles and a silently blank map.
+  const decoder = compressionDecoder(levels[0].compression);
+  if (!decoder) throw new Error(unsupportedCompressionMessage(levels[0].compression));
+  // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857), to check
+  // the planar config (multi-band), or to decode the tiles themselves.
+  // whitebox-wasm's streaming decoder is chunky-only and lacks LERC/ZSTD, so
+  // planar (INTERLEAVE=BAND) multi-band COGs and those codecs are read
   // through geotiff.js instead (see _assembleWindow / point).
   const multiBand = levels[0].bands > 1;
+  const geotiffCodec = decoder === "geotiff";
+  // geotiff.js's own LERC decoder drops the validity mask (nodata reads as 0);
+  // swap in the mask-aware one before the first tile is decoded.
+  if (geotiffCodec && parseCompression(levels[0].compression).code === LERC_COMPRESSION) {
+    await registerMaskedLercDecoder();
+  }
   let tiff = null, img = null, planar = false;
-  if (stream.epsg !== 3857 || multiBand || bigEndian) {
+  if (stream.epsg !== 3857 || multiBand || bigEndian || geotiffCodec) {
     tiff = await openTiff();
     img = await tiff.getImage();
     planar = multiBand && (await readTiffTag(img, "PlanarConfiguration")) === 2;
@@ -285,6 +301,7 @@ export async function openCog(source) {
     tiff,
     planar,
     bigEndian,
+    geotiffCodec,
   };
 
   if (stream.epsg === 3857) {
@@ -349,6 +366,13 @@ export class CogSource {
     return !!this.palette;
   }
 
+  /** True when pixels are read through geotiff.js rather than the wasm
+   * streaming decoder: planar layouts, big-endian samples, and codecs the wasm
+   * decoder lacks (LERC, ZSTD). */
+  get readsViaGeoTiff() {
+    return !!(this.planar || this.bigEndian || this.geotiffCodec);
+  }
+
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. */
   async renderTileRGBA(z, x, y, opts = {}) {
     return this._renderExtent(tileBounds3857(z, x, y), TILE, TILE, opts);
@@ -393,11 +417,12 @@ export class CogSource {
 
   // Fetch + decode band `band` (0-based) over a level pixel window into a
   // row-major buffer. Chunky COGs go through whitebox (cached, NaN for gaps);
-  // Planar (INTERLEAVE=BAND) and big-endian COGs are read per-band via
-  // geotiff.js. Whitebox's streaming decoder cannot address planar tiles and
-  // currently interprets multi-byte tile samples as little-endian.
+  // Planar (INTERLEAVE=BAND), big-endian, and LERC/ZSTD COGs are read per-band
+  // via geotiff.js. Whitebox's streaming decoder cannot address planar tiles,
+  // currently interprets multi-byte tile samples as little-endian, and has no
+  // LERC or ZSTD codec.
   async _assembleWindow(level, x, y, w, h, band = 0) {
-    if (this.planar || this.bigEndian) {
+    if (this.readsViaGeoTiff) {
       const img = await this._tiffImage(level);
       const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
       return rasters[0]; // typed array, length w*h, row-major
@@ -644,8 +669,9 @@ export class CogSource {
     }
     const bands = bidx ? bidx.map((b) => b - 1) : Array.from({ length: l0.bands }, (_, i) => i);
     let values;
-    if (this.planar) {
-      // Planar: whitebox can't address bands 1..n; read the pixel via geotiff.js.
+    if (this.readsViaGeoTiff) {
+      // Same decoder as _assembleWindow: whitebox can't address planar bands,
+      // reads big-endian samples as little-endian, and lacks LERC/ZSTD.
       const img = await this._tiffImage(0);
       const r = await img.readRasters({ window: [col, row, col + 1, row + 1], samples: bands });
       values = r.map((b) => b[0]);
