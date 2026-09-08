@@ -221,6 +221,41 @@ A `256*256*4` RGBA tile. `pixels` is the decoded row-major `f64` window;
 `colormap` is `"viridis" | "magma" | "terrain" | "gray"`. Empty windows render
 fully transparent.
 
+## Compression
+
+Tiles are decoded by whitebox-wasm's pure-Rust codec stack (None, LZW, Deflate,
+PackBits, JPEG, WebP, JPEG-XL) or, for the codecs it lacks, by geotiff.js (LERC
+in all three `LERC`/`LERC_DEFLATE`/`LERC_ZSTD` modes, and ZSTD). `openCog`
+picks the decoder from the header and **rejects** a COG whose compression
+neither can read (LZMA, JPEG 2000, CCITT, ...), so hosts can show the error
+instead of a silently blank layer. `compressionDecoder(levelInfo.compression)`
+exposes the same decision. Overviews may use a different codec than the base
+image (GDAL's `OVERVIEW_COMPRESS`); the decision is made per level.
+
+With geotiff.js 2.x, direct ZSTD is rejected at open (2.x has no decoder for
+TIFF code 50000) and LERC renders without its validity mask; geotiff.js 3.x
+supports both fully.
+
+LERC tiles carry a validity mask that geotiff.js's built-in decoder discards
+(nodata pixels would read as 0). `openCog` registers a mask-aware replacement
+([`lerc-decoder.js`](lerc-decoder.js)) that fills masked pixels with the
+dataset's `GDAL_NODATA` value, or NaN for floating-point rasters without one.
+It uses the `lerc`, `pako`, and `zstddec` packages geotiff.js already depends
+on (declared as optional peers); if they cannot be resolved, the built-in
+decoder stays in place.
+
+lerc finds its `lerc-wasm.wasm` relative to its own module URL, which bundlers
+that hash assets or pre-bundle dependencies do not always rewrite. If the
+console reports a wasm compile error (`expected magic word 00 61 73 6d`), hand
+the decoder the URL your bundler resolves for the asset before the first LERC
+COG opens:
+
+```js
+import lercWasmUrl from "lerc/lerc-wasm.wasm?url"; // Vite
+import { configureLercDecoder } from "cog-tiler-wasm";
+configureLercDecoder({ wasmUrl: lercWasmUrl });
+```
+
 ## Roadmap
 
 - **TiTiler COG API parity** - done: `info`, `info.geojson`, `tilejson`,
@@ -230,7 +265,9 @@ fully transparent.
 - **Warping** of projected/4326 sources and **paletted/categorical** rendering
   are done in [`cog-tiler.js`](cog-tiler.js) (proj4js + geotiff.js). **Planar**
   (`INTERLEAVE=BAND`) multi-band COGs are read per-band via geotiff.js too, since
-  whitebox-wasm's streaming decoder is chunky-only. Next: planar support
+  whitebox-wasm's streaming decoder is chunky-only, as are **LERC** and **ZSTD**
+  COGs, which the wasm codec stack lacks (see [Compression](#compression)).
+  Next: planar support
   **upstream in `whitebox-wasm`** (and exposing its proj string + color table) to
   drop the geotiff.js dependency, then move the warp into the Rust crate
   (`proj4rs`).

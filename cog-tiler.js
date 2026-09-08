@@ -25,6 +25,12 @@ import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
 import geokeysToProj4 from "geotiff-geokeys-to-proj4";
+import { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
+import { LERC_COMPRESSION, registerMaskedLercDecoder } from "./lerc-decoder.js";
+
+export { configureLercDecoder } from "./lerc-decoder.js";
+
+export { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { sampleWindowBilinear } from "./sampling.js";
 import {
   HEADER_PREFIX,
@@ -33,6 +39,7 @@ import {
   MAX_HEADER_TAIL,
   widenHeaderWindow,
 } from "./header-window.js";
+import { computeStats } from "./statistics.js";
 
 export { widenHeaderWindow } from "./header-window.js";
 
@@ -59,6 +66,13 @@ proj4.defs(
 );
 
 let _ready = null;
+const warned = new Set();
+function warnOnce(key, message) {
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(message);
+}
+
 /** Initialize the wasm modules (idempotent). Resolve this before `openCog`. */
 export function init() {
   if (!_ready) _ready = Promise.all([initWhitebox(), initTiler()]);
@@ -86,44 +100,6 @@ function dtypeOf(lv) {
   if (f === "uint" || f.includes("unsigned")) return "uint" + b;
   if (f === "int" || f.includes("signed")) return "int" + b;
   return (f || "uint") + b;
-}
-
-/** Min/max/mean/std/count/valid_percent/percentiles/histogram for a band buffer. */
-function computeStats(buf, nodata) {
-  let min = Infinity, max = -Infinity, sum = 0, sumsq = 0;
-  const valid = [];
-  for (let i = 0; i < buf.length; i++) {
-    const v = buf[i];
-    if (Number.isNaN(v)) continue;
-    if (nodata != null && v === nodata) continue;
-    if (v < min) min = v;
-    if (v > max) max = v;
-    sum += v;
-    sumsq += v * v;
-    valid.push(v);
-  }
-  const count = valid.length;
-  if (count === 0) return { count: 0, valid_percent: 0 };
-  const mean = sum / count;
-  const std = Math.sqrt(Math.max(0, sumsq / count - mean * mean));
-  valid.sort((a, b) => a - b);
-  const pct = (p) => valid[Math.min(count - 1, Math.floor((p / 100) * count))];
-  const bins = 10, span = max - min || 1, hist = new Array(bins).fill(0);
-  for (const v of valid) {
-    let k = Math.floor(((v - min) / span) * bins);
-    if (k >= bins) k = bins - 1;
-    if (k < 0) k = 0;
-    hist[k]++;
-  }
-  const edges = Array.from({ length: bins + 1 }, (_, i) => min + (span * i) / bins);
-  return {
-    min, max, mean, std, count,
-    valid_percent: (count / buf.length) * 100,
-    median: pct(50),
-    percentile_2: pct(2),
-    percentile_98: pct(98),
-    histogram: [hist, edges],
-  };
 }
 
 /** Transfer curve for a rescaled value in 0..1: stretch then gamma (mirrors the
@@ -344,24 +320,71 @@ async function openHeader(range) {
 export async function openCog(source) {
   await init();
   const { range, openTiff, label } = await makeReader(source);
+  // whitebox-wasm's streaming decoder currently materializes numeric tile
+  // samples as little-endian. Detect Motorola TIFFs up front so their pixels
+  // can be decoded by geotiff.js, which honors the header byte order.
+  const byteOrder = await range(0, 1);
+  const bigEndian = byteOrder[0] === 0x4d && byteOrder[1] === 0x4d;
   const stream = await openHeader(range);
-  const gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
+  let gt = stream.geo_transform(); // [x0, px_w, rot, y0, rot, px_h]
   const levels = JSON.parse(stream.levels_json());
   if (!Array.isArray(levels) || levels.length === 0) {
     throw new Error("levels_json() returned no levels");
   }
-  // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857) or to check
-  // the planar config (multi-band). whitebox-wasm's streaming decoder is
-  // chunky-only, so planar (INTERLEAVE=BAND) multi-band COGs are read per-band
+  // Fail at open time, not tile by tile, when no decoder can read a codec:
+  // hosts surface an openCog rejection as a layer error, whereas a tile decode
+  // failure only yields transparent tiles and a silently blank map. Every
+  // level is checked because GDAL can compress overviews differently from the
+  // base image (OVERVIEW_COMPRESS), so the decoder is chosen per level.
+  // geotiff.js 3.x registers direct ZSTD (50000) and hands decoders typed
+  // parameters (which the mask-aware LERC decoder relies on); 2.x does
+  // neither. 3.x is the major that started exporting ImageFileDirectory.
+  const geotiffV3 = typeof GeoTIFF.ImageFileDirectory === "function";
+  const codecOptions = { directZstd: geotiffV3 };
+  const decoders = levels.map((lv) => compressionDecoder(lv.compression, codecOptions));
+  const unsupported = decoders.indexOf(null);
+  if (unsupported >= 0) {
+    throw new Error(unsupportedCompressionMessage(levels[unsupported].compression, codecOptions));
+  }
+  // Open the GeoTIFF with geotiff.js when we need the CRS (non-3857), to check
+  // the planar config (multi-band), or to decode tiles of some level.
+  // whitebox-wasm's streaming decoder is chunky-only and lacks LERC/ZSTD, so
+  // planar (INTERLEAVE=BAND) multi-band COGs and those codecs are read
   // through geotiff.js instead (see _assembleWindow / point).
   const multiBand = levels[0].bands > 1;
+  const geotiffCodec = decoders.some((d) => d === "geotiff");
+  // geotiff.js's own LERC decoder drops the validity mask (nodata reads as 0);
+  // swap in the mask-aware one before the first tile is decoded. It targets
+  // the 3.x decoder contract, so on 2.x the built-in decoder stays (LERC still
+  // renders, masked pixels read as 0).
+  if (levels.some((lv) => parseCompression(lv.compression).code === LERC_COMPRESSION)) {
+    if (geotiffV3) await registerMaskedLercDecoder();
+    else warnOnce("lerc-mask-v2", "[cog-tiler] geotiff.js 2.x: LERC validity mask not applied; upgrade to geotiff 3.x for correct nodata.");
+  }
   let tiff = null, img = null, planar = false;
-  if (stream.epsg !== 3857 || multiBand) {
+  if (stream.epsg !== 3857 || multiBand || bigEndian || geotiffCodec) {
     tiff = await openTiff();
     img = await tiff.getImage();
     planar = multiBand && (await readTiffTag(img, "PlanarConfiguration")) === 2;
+    if (bigEndian && gt.length !== 6) {
+      const [x, y] = img.getOrigin();
+      const [pixelWidth, pixelHeight] = img.getResolution();
+      gt = [x, pixelWidth, 0, y, 0, -pixelHeight];
+    }
   }
-  const base = { url: label, range, stream, levels, gt, nodata: stream.nodata, tiff, planar };
+  const base = {
+    url: label,
+    range,
+    stream,
+    levels,
+    gt,
+    nodata: stream.nodata,
+    tiff,
+    planar,
+    bigEndian,
+    geotiffCodec,
+    decoders,
+  };
 
   if (stream.epsg === 3857) {
     return new CogSource({
@@ -425,6 +448,20 @@ export class CogSource {
     return !!this.palette;
   }
 
+  /** True when some level's pixels are read through geotiff.js rather than
+   * the wasm streaming decoder: planar layouts, big-endian samples, and codecs
+   * the wasm decoder lacks (LERC, ZSTD). Per-level: {@link levelReadsViaGeoTiff}. */
+  get readsViaGeoTiff() {
+    return !!(this.planar || this.bigEndian || this.geotiffCodec);
+  }
+
+  /** Whether `level` is read through geotiff.js. Overviews may be compressed
+   * differently from the base image (GDAL's OVERVIEW_COMPRESS), so the codec
+   * decision is per level; planar and big-endian apply to every level. */
+  levelReadsViaGeoTiff(level) {
+    return !!(this.planar || this.bigEndian || this.decoders?.[level] === "geotiff");
+  }
+
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. */
   async renderTileRGBA(z, x, y, opts = {}) {
     return this._renderExtent(tileBounds3857(z, x, y), TILE, TILE, opts);
@@ -469,8 +506,10 @@ export class CogSource {
 
   // Fetch + decode band `band` (0-based) over a level pixel window into a
   // row-major buffer. Chunky COGs go through whitebox (cached, NaN for gaps);
-  // planar (INTERLEAVE=BAND) COGs are read per-band via geotiff.js, which
-  // whitebox's chunky-only streaming decoder can't address.
+  // Planar (INTERLEAVE=BAND), big-endian, and LERC/ZSTD COGs are read per-band
+  // via geotiff.js. Whitebox's streaming decoder cannot address planar tiles,
+  // currently interprets multi-byte tile samples as little-endian, and has no
+  // LERC or ZSTD codec.
   async _assembleWindow(level, x, y, w, h, band = 0) {
     if (w * h > MAX_WINDOW_SAMPLES) {
       throw new Error(
@@ -480,7 +519,7 @@ export class CogSource {
             : ""),
       );
     }
-    if (this.planar) {
+    if (this.levelReadsViaGeoTiff(level)) {
       const img = await this._tiffImage(level);
       const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
       return rasters[0]; // typed array, length w*h, row-major
@@ -750,8 +789,9 @@ export class CogSource {
     }
     const bands = bidx ? bidx.map((b) => b - 1) : Array.from({ length: l0.bands }, (_, i) => i);
     let values;
-    if (this.planar) {
-      // Planar: whitebox can't address bands 1..n; read the pixel via geotiff.js.
+    if (this.levelReadsViaGeoTiff(0)) {
+      // Same decoder as _assembleWindow: whitebox can't address planar bands,
+      // reads big-endian samples as little-endian, and lacks LERC/ZSTD.
       const img = await this._tiffImage(0);
       const r = await img.readRasters({ window: [col, row, col + 1, row + 1], samples: bands });
       values = r.map((b) => b[0]);

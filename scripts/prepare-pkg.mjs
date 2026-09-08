@@ -16,6 +16,9 @@ const pkgDir = process.argv[2] || join(root, "crates/cog-tiler-wasm/pkg");
 
 copyFileSync(join(root, "cog-tiler.js"), join(pkgDir, "cog-tiler.js"));
 copyFileSync(join(root, "sampling.js"), join(pkgDir, "sampling.js"));
+copyFileSync(join(root, "statistics.js"), join(pkgDir, "statistics.js"));
+copyFileSync(join(root, "compression.js"), join(pkgDir, "compression.js"));
+copyFileSync(join(root, "lerc-decoder.js"), join(pkgDir, "lerc-decoder.js"));
 copyFileSync(join(root, "header-window.js"), join(pkgDir, "header-window.js"));
 copyFileSync(join(root, "cog-tiler.d.ts"), join(pkgDir, "cog-tiler.d.ts"));
 copyFileSync(join(root, "README.md"), join(pkgDir, "README.md"));
@@ -39,6 +42,9 @@ pkg.files = Array.from(
     ...(pkg.files || []),
     "cog-tiler.js",
     "sampling.js",
+    "statistics.js",
+    "compression.js",
+    "lerc-decoder.js",
     "header-window.js",
     "cog-tiler.d.ts",
     "README.md",
@@ -56,7 +62,18 @@ pkg.peerDependencies = {
   "whitebox-wasm": "^0.6.0",
   proj4: "^2.15.0",
   geotiff: "^2.1.0 || ^3.0.0",
-  "geotiff-geokeys-to-proj4": "^2024.4.13",
+  "geotiff-geokeys-to-proj4": "^2024.4.13 || ^2026.8.16",
+  // Optional: geotiff.js's own LERC codec packages, used by lerc-decoder.js to
+  // re-apply the LERC validity mask. Missing packages degrade to geotiff's
+  // built-in (mask-less) decoder rather than failing.
+  lerc: "^3.0.0 || ^4.0.0",
+  pako: "^1.0.11 || ^2.0.4",
+  zstddec: "^0.2.0",
+};
+pkg.peerDependenciesMeta = {
+  lerc: { optional: true },
+  pako: { optional: true },
+  zstddec: { optional: true },
 };
 pkg.keywords = [
   "cog", "geotiff", "tiler", "webassembly", "wasm",

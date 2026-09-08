@@ -7,7 +7,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..");
-for (const f of ["cog-tiler.js", "sampling.js", "header-window.js"]) {
+for (const f of [
+  "cog-tiler.js",
+  "sampling.js",
+  "statistics.js",
+  "compression.js",
+  "lerc-decoder.js",
+  "header-window.js",
+]) {
   copyFileSync(join(root, f), join(root, "demo", f));
 }
 copyFileSync(join(root, "examples", "sample-3857-cog.tif"), join(root, "demo", "sample-3857-cog.tif"));
