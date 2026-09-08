@@ -221,6 +221,18 @@ It uses the `lerc`, `pako`, and `zstddec` packages geotiff.js already depends
 on (declared as optional peers); if they cannot be resolved, the built-in
 decoder stays in place.
 
+lerc finds its `lerc-wasm.wasm` relative to its own module URL, which bundlers
+that hash assets or pre-bundle dependencies do not always rewrite. If the
+console reports a wasm compile error (`expected magic word 00 61 73 6d`), hand
+the decoder the URL your bundler resolves for the asset before the first LERC
+COG opens:
+
+```js
+import lercWasmUrl from "lerc/lerc-wasm.wasm?url"; // Vite
+import { configureLercDecoder } from "cog-tiler-wasm";
+configureLercDecoder({ wasmUrl: lercWasmUrl });
+```
+
 ## Roadmap
 
 - **TiTiler COG API parity** - done: `info`, `info.geojson`, `tilejson`,

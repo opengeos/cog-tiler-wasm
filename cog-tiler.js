@@ -28,6 +28,8 @@ import geokeysToProj4 from "geotiff-geokeys-to-proj4";
 import { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { LERC_COMPRESSION, registerMaskedLercDecoder } from "./lerc-decoder.js";
 
+export { configureLercDecoder } from "./lerc-decoder.js";
+
 export { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { sampleWindowBilinear } from "./sampling.js";
 import { computeStats } from "./statistics.js";

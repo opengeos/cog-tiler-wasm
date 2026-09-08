@@ -145,6 +145,16 @@ export declare function parseCompression(compression: string | undefined): { cod
 /** The message `openCog` rejects with for a codec no decoder handles. */
 export declare function unsupportedCompressionMessage(compression: string | undefined): string;
 
+/**
+ * Where lerc's `lerc-wasm.wasm` is served from, for the mask-aware LERC
+ * decoder. lerc resolves it relative to its own module URL, which bundlers
+ * that hash assets or pre-bundle dependencies do not always rewrite; pass the
+ * URL your bundler resolves for the asset (Vite:
+ * `import lercWasmUrl from "lerc/lerc-wasm.wasm?url"`). Call before the first
+ * LERC COG opens. `null`/omitted restores lerc's own resolution.
+ */
+export declare function configureLercDecoder(options?: { wasmUrl?: string | URL | null }): void;
+
 /** Encode an RGBA buffer to PNG bytes (browser; uses OffscreenCanvas).
  *  Defaults to 256x256 when `width`/`height` are omitted. */
 export declare function rgbaToPng(

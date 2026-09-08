@@ -65,6 +65,25 @@ export function applyLercMask(pixels, mask, dims, fill) {
 }
 
 let registration = null;
+let lercWasmUrl = null;
+
+/**
+ * Tell the decoder where lerc's `lerc-wasm.wasm` is served from. lerc locates
+ * it with `new URL("lerc-wasm.wasm", import.meta.url)`, which bundlers that
+ * hash assets or pre-bundle dependencies do not always rewrite (Vite serves
+ * index.html for the stale path and the wasm compile fails). Hosts can pass
+ * the URL their bundler resolves for the asset, e.g. Vite's
+ * `import lercWasmUrl from "lerc/lerc-wasm.wasm?url"`. Call it before the
+ * first LERC COG is opened; `null` restores lerc's own resolution.
+ */
+export function configureLercDecoder({ wasmUrl } = {}) {
+  lercWasmUrl = wasmUrl == null ? null : String(wasmUrl);
+}
+
+/** The lerc `load()` options for the configured wasm location. */
+export function lercLoadOptions() {
+  return lercWasmUrl ? { locateFile: () => lercWasmUrl } : {};
+}
 
 /**
  * Register the mask-aware LERC decoder with geotiff.js (idempotent). Resolves
@@ -93,7 +112,7 @@ export function registerMaskedLercDecoder() {
     if (typeof lerc.decode !== "function" || typeof inflate !== "function" || !ZSTDDecoder) return false;
     const zstd = new ZSTDDecoder();
     let ready = null;
-    const init = () => (ready ??= Promise.all([lerc.load?.(), zstd.init()]));
+    const init = () => (ready ??= Promise.all([lerc.load?.(lercLoadOptions()), zstd.init()]));
 
     class MaskedLercDecoder extends BaseDecoder {
       async decodeBlock(buffer) {
@@ -109,7 +128,14 @@ export function registerMaskedLercDecoder() {
         const result = lerc.decode(bytes, { returnPixelInterleavedDims: planarConfiguration === 1 });
         const pixels = result.pixels[0];
         const dims = planarConfiguration === 1 ? Math.max(1, result.dimCount ?? 1) : 1;
-        applyLercMask(pixels, result.mask, dims, lercMaskFillValue(nodata, pixels));
+        const fill = lercMaskFillValue(nodata, pixels);
+        if (result.validPixelCount === 0) {
+          // A tile with no valid pixel carries no mask at all; lerc hands back
+          // zeros for it, so fill the whole block rather than trust the mask.
+          if (fill !== undefined) pixels.fill(fill);
+        } else {
+          applyLercMask(pixels, result.mask, dims, fill);
+        }
         return pixels.buffer;
       }
     }
