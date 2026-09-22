@@ -24,7 +24,10 @@ import initWhitebox, { CogStream } from "whitebox-wasm";
 import initTiler, { colorize, colormap_names } from "./cog_tiler_wasm.js";
 import proj4 from "proj4";
 import * as GeoTIFF from "geotiff";
-import geokeysToProj4 from "geotiff-geokeys-to-proj4";
+// Named import, not the default: geotiff-geokeys-to-proj4 2026.8.16 dropped its
+// default export, and the peer range accepts it. The 2024.4.13 build ships both,
+// so `toProj4` is the one specifier that resolves on every accepted version.
+import { toProj4 } from "geotiff-geokeys-to-proj4";
 import { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { LERC_COMPRESSION, registerMaskedLercDecoder } from "./lerc-decoder.js";
 
@@ -171,7 +174,7 @@ function projectedWktFromGeoKeys(geoKeys) {
  * parses the ESRI/OGC WKT directly.
  */
 function sourceCrsDef(geoKeys) {
-  const result = geokeysToProj4.toProj4(geoKeys);
+  const result = toProj4(geoKeys);
   if (result.isGCS) {
     const wkt = projectedWktFromGeoKeys(geoKeys);
     if (wkt) return wkt;
