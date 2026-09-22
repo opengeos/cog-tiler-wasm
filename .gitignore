@@ -8,6 +8,8 @@ node_modules
 # is canonical at the repo root and copied into demo/ for local serving.
 /demo/cog_tiler_wasm*
 /demo/cog-tiler.js
+/demo/sampling.js
+/demo/header-window.js
 /demo/package.json
 /demo/.gitignore
 /demo/sample-3857-cog.tif

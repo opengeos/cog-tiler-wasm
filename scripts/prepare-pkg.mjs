@@ -19,6 +19,7 @@ copyFileSync(join(root, "sampling.js"), join(pkgDir, "sampling.js"));
 copyFileSync(join(root, "statistics.js"), join(pkgDir, "statistics.js"));
 copyFileSync(join(root, "compression.js"), join(pkgDir, "compression.js"));
 copyFileSync(join(root, "lerc-decoder.js"), join(pkgDir, "lerc-decoder.js"));
+copyFileSync(join(root, "header-window.js"), join(pkgDir, "header-window.js"));
 copyFileSync(join(root, "cog-tiler.d.ts"), join(pkgDir, "cog-tiler.d.ts"));
 copyFileSync(join(root, "README.md"), join(pkgDir, "README.md"));
 copyFileSync(join(root, "LICENSE"), join(pkgDir, "LICENSE"));
@@ -44,6 +45,7 @@ pkg.files = Array.from(
     "statistics.js",
     "compression.js",
     "lerc-decoder.js",
+    "header-window.js",
     "cog-tiler.d.ts",
     "README.md",
     "LICENSE",
@@ -54,8 +56,10 @@ pkg.files = Array.from(
 // geotiff accepts v2 or v3: only the stable high-level API (fromUrl,
 // fromBlob, fromArrayBuffer, getImage, getGeoKeys, readRasters) is used, which
 // is unchanged across the v3 major, so the range must not block v3 consumers.
+// whitebox-wasm >= 0.6.0 for `first_ifd_offset` + `CogStream.from_windows`,
+// which is how a plain GeoTIFF's trailing directory gets read.
 pkg.peerDependencies = {
-  "whitebox-wasm": "^0.4.1 || ^0.5.1",
+  "whitebox-wasm": "^0.6.0",
   proj4: "^2.15.0",
   geotiff: "^2.1.0 || ^3.0.0",
   "geotiff-geokeys-to-proj4": "^2024.4.13 || ^2026.8.16",
