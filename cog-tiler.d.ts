@@ -62,9 +62,13 @@ export declare class CogSource {
   readonly boundsLonLat: number[];
   /** True when the band is paletted (categorical) and rendered via its table. */
   readonly hasPalette: boolean;
+  /** True when the file is stored bottom-up (positive Y pixel size: row 0 is
+   * the southern edge). Reads mirror the row window and flip it back, so the
+   * source renders north-up like any other. */
+  readonly flipY: boolean;
   /** True when some level's pixels are read through geotiff.js rather than
-   * the wasm streaming decoder: planar layouts, big-endian samples, and codecs
-   * the wasm decoder lacks (LERC, ZSTD). */
+   * the wasm streaming decoder: planar layouts, big-endian samples, bottom-up
+   * files, and codecs the wasm decoder lacks (LERC, ZSTD). */
   readonly readsViaGeoTiff: boolean;
   /** Whether `level` is read through geotiff.js. Overviews may be compressed
    * differently from the base image (GDAL's OVERVIEW_COMPRESS). */
