@@ -36,6 +36,7 @@ export { configureLercDecoder } from "./lerc-decoder.js";
 export { compressionDecoder, parseCompression, unsupportedCompressionMessage } from "./compression.js";
 import { sampleWindowBilinear } from "./sampling.js";
 import { computeStats } from "./statistics.js";
+import { flipRows, geoTransformFromTags, normalizeGeoTransform } from "./geotransform.js";
 
 const OS = 20037508.342789244; // Web Mercator half-extent (m)
 const TILE = 256; // output tile size (px)
@@ -305,16 +306,28 @@ export async function openCog(source) {
     if (geotiffV3) await registerMaskedLercDecoder();
     else warnOnce("lerc-mask-v2", "[cog-tiler] geotiff.js 2.x: LERC validity mask not applied; upgrade to geotiff 3.x for correct nodata.");
   }
+  const headerGt = gt.length === 6;
   let tiff = null, img = null, planar = false;
-  if (stream.epsg !== 3857 || multiBand || bigEndian || geotiffCodec) {
+  if (stream.epsg !== 3857 || multiBand || bigEndian || geotiffCodec || !headerGt) {
     tiff = await openTiff();
     img = await tiff.getImage();
     planar = multiBand && (await readTiffTag(img, "PlanarConfiguration")) === 2;
-    if (bigEndian && gt.length !== 6) {
-      const [x, y] = img.getOrigin();
-      const [pixelWidth, pixelHeight] = img.getResolution();
-      gt = [x, pixelWidth, 0, y, 0, -pixelHeight];
+    if (!headerGt) {
+      gt = geoTransformFromTags(
+        await readTiffTag(img, "ModelTransformation"),
+        await readTiffTag(img, "ModelTiepoint"),
+        await readTiffTag(img, "ModelPixelScale"),
+      );
     }
+  }
+  const normalized = normalizeGeoTransform(gt, levels[0].height);
+  gt = normalized.gt;
+  const flipY = normalized.flipY;
+  // whitebox-wasm's tile decoder addresses stored rows, so a bottom-up file is
+  // read through geotiff.js, where the mirrored row window is applied.
+  if (flipY && !tiff) {
+    tiff = await openTiff();
+    img = await tiff.getImage();
   }
   const base = {
     url: label,
@@ -327,6 +340,7 @@ export async function openCog(source) {
     planar,
     bigEndian,
     geotiffCodec,
+    flipY,
     decoders,
   };
 
@@ -337,7 +351,7 @@ export async function openCog(source) {
       crsLabel: "EPSG:3857",
       palette: null,
       toSource: { forward: (c) => c }, // identity: mercator meters == source meters
-      boundsLonLat: Array.from(stream.bounds_lonlat()),
+      boundsLonLat: headerGt && !flipY ? Array.from(stream.bounds_lonlat()) : lonLatBoundsOfGt(gt, levels[0], proj4("EPSG:3857", "EPSG:4326")),
     });
   }
 
@@ -348,8 +362,19 @@ export async function openCog(source) {
   const toLonLat = proj4(srcDef, "EPSG:4326"); // forward: source -> lon/lat
   const palette = buildPalette(await readTiffTag(img, "ColorMap"));
 
-  // fitBounds bounds: transform the source corners to lon/lat.
-  const fw = levels[0].width, fh = levels[0].height;
+  return new CogSource({
+    ...base,
+    mode: "warp",
+    toSource,
+    palette,
+    boundsLonLat: lonLatBoundsOfGt(gt, levels[0], toLonLat),
+    crsLabel: "warped from " + crsLabelForDef(srcDef),
+  });
+}
+
+/** fitBounds bounds: the raster's source-CRS corners transformed to lon/lat. */
+function lonLatBoundsOfGt(gt, level0, toLonLat) {
+  const fw = level0.width, fh = level0.height;
   const corners = [
     [gt[0], gt[3]],
     [gt[0] + fw * gt[1], gt[3]],
@@ -357,15 +382,7 @@ export async function openCog(source) {
     [gt[0] + fw * gt[1], gt[3] + fh * gt[5]],
   ].map((c) => toLonLat.forward(c));
   const lons = corners.map((c) => c[0]), lats = corners.map((c) => c[1]);
-
-  return new CogSource({
-    ...base,
-    mode: "warp",
-    toSource,
-    palette,
-    boundsLonLat: [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)],
-    crsLabel: "warped from " + crsLabelForDef(srcDef),
-  });
+  return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
 }
 
 /** A short label for a proj4 def: the `+proj=...` token, or the WKT's CRS name,
@@ -396,14 +413,14 @@ export class CogSource {
    * the wasm streaming decoder: planar layouts, big-endian samples, and codecs
    * the wasm decoder lacks (LERC, ZSTD). Per-level: {@link levelReadsViaGeoTiff}. */
   get readsViaGeoTiff() {
-    return !!(this.planar || this.bigEndian || this.geotiffCodec);
+    return !!(this.planar || this.bigEndian || this.geotiffCodec || this.flipY);
   }
 
   /** Whether `level` is read through geotiff.js. Overviews may be compressed
    * differently from the base image (GDAL's OVERVIEW_COMPRESS), so the codec
    * decision is per level; planar and big-endian apply to every level. */
   levelReadsViaGeoTiff(level) {
-    return !!(this.planar || this.bigEndian || this.decoders?.[level] === "geotiff");
+    return !!(this.planar || this.bigEndian || this.flipY || this.decoders?.[level] === "geotiff");
   }
 
   /** Render an XYZ tile to a 256x256 RGBA buffer, or null if empty. */
@@ -442,7 +459,14 @@ export class CogSource {
     if (!this._imgs) this._imgs = new Map();
     let p = this._imgs.get(level);
     if (!p) {
-      p = this.tiff.getImage(level);
+      p = this.tiff.getImage(level).then(async (img) => {
+        // geotiff.js 3.x otherwise fetches each tile's offset and byte count
+        // with its own tiny range request: two extra round trips per tile
+        // (~0.5 s each over a slow link). The whole tables are a few KB.
+        await Promise.all(["TileOffsets", "TileByteCounts", "StripOffsets", "StripByteCounts"].map((tag) => readTiffTag(img, tag)));
+        return img;
+      });
+      p.catch(() => this._imgs.delete(level));
       this._imgs.set(level, p);
     }
     return p;
@@ -457,8 +481,11 @@ export class CogSource {
   async _assembleWindow(level, x, y, w, h, band = 0) {
     if (this.levelReadsViaGeoTiff(level)) {
       const img = await this._tiffImage(level);
-      const rasters = await img.readRasters({ window: [x, y, x + w, y + h], samples: [band] });
-      return rasters[0]; // typed array, length w*h, row-major
+      // A bottom-up file stores the north-up window's rows mirrored.
+      const y0 = this.flipY ? this.levels[level].height - (y + h) : y;
+      const rasters = await img.readRasters({ window: [x, y0, x + w, y0 + h], samples: [band] });
+      const buf = rasters[0]; // typed array, length w*h, row-major
+      return this.flipY ? flipRows(buf, w, h) : buf;
     }
     const lv = this.levels[level];
     const tiles = JSON.parse(this.stream.tiles_for_window(level, x, y, w, h));
@@ -706,7 +733,8 @@ export class CogSource {
       // Same decoder as _assembleWindow: whitebox can't address planar bands,
       // reads big-endian samples as little-endian, and lacks LERC/ZSTD.
       const img = await this._tiffImage(0);
-      const r = await img.readRasters({ window: [col, row, col + 1, row + 1], samples: bands });
+      const storedRow = this.flipY ? l0.height - 1 - row : row;
+      const r = await img.readRasters({ window: [col, storedRow, col + 1, storedRow + 1], samples: bands });
       values = r.map((b) => b[0]);
     } else {
       const tcol = Math.floor(col / l0.tile_width), trow = Math.floor(row / l0.tile_height);

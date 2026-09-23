@@ -19,6 +19,7 @@ copyFileSync(join(root, "sampling.js"), join(pkgDir, "sampling.js"));
 copyFileSync(join(root, "statistics.js"), join(pkgDir, "statistics.js"));
 copyFileSync(join(root, "compression.js"), join(pkgDir, "compression.js"));
 copyFileSync(join(root, "lerc-decoder.js"), join(pkgDir, "lerc-decoder.js"));
+copyFileSync(join(root, "geotransform.js"), join(pkgDir, "geotransform.js"));
 copyFileSync(join(root, "cog-tiler.d.ts"), join(pkgDir, "cog-tiler.d.ts"));
 copyFileSync(join(root, "README.md"), join(pkgDir, "README.md"));
 copyFileSync(join(root, "LICENSE"), join(pkgDir, "LICENSE"));
@@ -44,6 +45,7 @@ pkg.files = Array.from(
     "statistics.js",
     "compression.js",
     "lerc-decoder.js",
+    "geotransform.js",
     "cog-tiler.d.ts",
     "README.md",
     "LICENSE",

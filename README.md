@@ -249,6 +249,11 @@ configureLercDecoder({ wasmUrl: lercWasmUrl });
   (`INTERLEAVE=BAND`) multi-band COGs are read per-band via geotiff.js too, since
   whitebox-wasm's streaming decoder is chunky-only, as are **LERC** and **ZSTD**
   COGs, which the wasm codec stack lacks (see [Compression](#compression)).
+  So are **bottom-up** files (a positive Y pixel size, row 0 at the south edge,
+  e.g. the AlphaEarth embedding COGs on Source Cooperative), whose row windows
+  are mirrored and flipped back; a transform given only as a
+  `ModelTransformation` is read through geotiff.js as well, since whitebox-wasm's
+  header parser only reads `ModelPixelScale` + `ModelTiepoint`.
   Next: planar support
   **upstream in `whitebox-wasm`** (and exposing its proj string + color table) to
   drop the geotiff.js dependency, then move the warp into the Rust crate

@@ -9,5 +9,6 @@ import { fileURLToPath } from "node:url";
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 copyFileSync(join(root, "cog-tiler.js"), join(root, "demo", "cog-tiler.js"));
 copyFileSync(join(root, "statistics.js"), join(root, "demo", "statistics.js"));
+copyFileSync(join(root, "geotransform.js"), join(root, "demo", "geotransform.js"));
 copyFileSync(join(root, "examples", "sample-3857-cog.tif"), join(root, "demo", "sample-3857-cog.tif"));
 console.log("assembled demo/ (cog-tiler.js + statistics.js + sample-3857-cog.tif)");
