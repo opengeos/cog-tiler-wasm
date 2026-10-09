@@ -43,6 +43,9 @@ import {
   widenHeaderWindow,
 } from "./header-window.js";
 import { computeStats } from "./statistics.js";
+import { applySourceCrsResolver } from "./source-crs.js";
+
+export { setSourceCrsResolver } from "./source-crs.js";
 import { flipRows, geoTransformFromTags, normalizeGeoTransform } from "./geotransform.js";
 
 export { widenHeaderWindow } from "./header-window.js";
@@ -201,9 +204,9 @@ function sourceCrsDef(geoKeys) {
   const result = toProj4(geoKeys);
   if (result.isGCS) {
     const wkt = projectedWktFromGeoKeys(geoKeys);
-    if (wkt) return wkt;
+    if (wkt) return applySourceCrsResolver(wkt, geoKeys);
   }
-  return result.proj4;
+  return applySourceCrsResolver(result.proj4, geoKeys);
 }
 
 /** Build a 256-entry RGBA palette from a TIFF ColorMap (16-bit R,G,B blocks). */
