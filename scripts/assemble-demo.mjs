@@ -15,6 +15,7 @@ for (const f of [
   "lerc-decoder.js",
   "header-window.js",
   "geotransform.js",
+  "source-crs.js",
 ]) {
   copyFileSync(join(root, f), join(root, "demo", f));
 }

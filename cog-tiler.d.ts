@@ -135,6 +135,18 @@ export declare class CogSource {
 /** Names of the built-in single-band colormaps. */
 export declare function colormaps(): string[];
 
+/**
+ * Set (or, with null, clear) a hook that adjusts each COG's source CRS
+ * definition before it is used to warp tiles, for example to add a datum
+ * shift (`+towgs84`) the EPSG tables leave out. It receives the proj4
+ * definition (a `+proj=...` string or WKT) and the COG's geo keys, and returns
+ * the definition to use; returning nothing keeps the original. Applies to COGs
+ * opened after the call.
+ */
+export declare function setSourceCrsResolver(
+  fn: ((def: string, geoKeys: Record<string, unknown>) => string | null | undefined) | null,
+): void;
+
 /** Initialize the wasm modules (idempotent). Resolve before `openCog`. */
 export declare function init(): Promise<unknown>;
 

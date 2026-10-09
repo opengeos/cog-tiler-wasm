@@ -110,6 +110,28 @@ map.addLayer({ id: "cog", type: "raster", source: "cog" });
 // and source.renderTileRGBA(z, x, y, render) / renderTilePNG(...) are also exposed.
 ```
 
+### Adjusting the source CRS
+
+A COG's CRS is built from its geo keys with `geotiff-geokeys-to-proj4`, whose
+EPSG tables leave some datum shifts out (the British National Grid, DHDN or
+Amersfoort, for example), so such a raster would be placed tens to hundreds of
+metres off. `setSourceCrsResolver` lets the host adjust the definition, for
+example by adding the `+towgs84` it knows for that code:
+
+```js
+import { setSourceCrsResolver } from "cog-tiler-wasm";
+
+setSourceCrsResolver((def, geoKeys) =>
+  geoKeys.ProjectedCSTypeGeoKey === 27700
+    ? `${def} +towgs84=446.448,-125.157,542.06,0.15,0.247,0.842,-20.489`
+    : undefined,
+);
+```
+
+The hook gets the proj4 definition (a `+proj=...` string or WKT) and the geo
+keys, and returns the definition to use; returning nothing keeps the original.
+It applies to COGs opened after the call; pass `null` to clear it.
+
 ### Plain GeoTIFFs (not only COGs)
 
 `openCog` also opens a **plain** GeoTIFF - what GDAL and libtiff write unless
