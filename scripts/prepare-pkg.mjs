@@ -63,7 +63,7 @@ pkg.files = Array.from(
 // whitebox-wasm >= 0.6.0 for `first_ifd_offset` + `CogStream.from_windows`,
 // which is how a plain GeoTIFF's trailing directory gets read.
 pkg.peerDependencies = {
-  "whitebox-wasm": "^0.6.0",
+  "whitebox-wasm": "^0.7.0",
   proj4: "^2.15.0",
   geotiff: "^2.1.0 || ^3.0.0",
   "geotiff-geokeys-to-proj4": "^2024.4.13 || ^2026.8.16",
