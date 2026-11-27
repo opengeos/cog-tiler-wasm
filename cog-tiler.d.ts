@@ -4,9 +4,9 @@
  */
 
 export interface RenderOptions {
-  /** Low end of the rescale range (continuous bands). Default 0. */
+  /** Low end of the rescale range. Default 0 (-128 for int8 data). */
   min?: number;
-  /** High end of the rescale range (continuous bands). Default 1. */
+  /** High end of the rescale range. Default 255 for uint8, 127 for int8, else 1. */
   max?: number;
   /** Per-band rescale `[[min,max], ...]`, or a single `[min,max]`. Overrides min/max. */
   rescale?: [number, number][] | [number, number];
@@ -109,7 +109,9 @@ export declare class CogSource {
     lat: number,
     opts?: { bidx?: number[] },
   ): Promise<{ coordinates: [number, number]; values: number[]; band_names: string[]; outside?: boolean }>;
-  /** Per-band statistics from a decimated overview (≤ `maxSize` px wide). */
+  /** Per-band statistics from a decimated overview (≤ `maxSize` px wide). A
+   *  raster without a small enough level (no overviews) is sampled from an even
+   *  spread of windows totalling about `maxSize`² pixels instead. */
   statistics(opts?: { maxSize?: number }): Promise<Record<string, Record<string, unknown>>>;
 
   /** Render a preview of the whole dataset (≈ `/cog/preview`). */

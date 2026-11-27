@@ -42,3 +42,69 @@ export function computeStats(buf, nodata) {
     histogram: [histogram, edges],
   };
 }
+
+/**
+ * Plan a sparse set of source windows to sample statistics from when the
+ * coarsest level is too large to read whole.
+ *
+ * A raster with no overviews has only full resolution to offer, and reading
+ * all of it to estimate a stretch either decodes the entire file or trips the
+ * read-size ceiling. Instead, take a grid of block-aligned windows spread
+ * evenly across the image, at most `budget` pixels in total. Aligning each
+ * window to the storage blocks means every tile it touches is decoded once
+ * and serves every band.
+ *
+ * @param {number} width - Level width in pixels.
+ * @param {number} height - Level height in pixels.
+ * @param {number} blockW - Storage tile width (0 or missing for untiled).
+ * @param {number} blockH - Storage tile height (0 or missing for untiled).
+ * @param {number} budget - Most pixels to sample across all windows.
+ * @returns {Array<[number, number, number, number]>} `[x, y, w, h]` windows.
+ */
+export function sampleWindows(width, height, blockW, blockH, budget) {
+  const clampBlock = (b, extent) => Math.max(1, Math.min(extent, Math.max(64, Math.min(1024, b || 256))));
+  const bw = clampBlock(blockW, width);
+  const bh = clampBlock(blockH, height);
+  const cols = Math.max(1, Math.floor(width / bw));
+  const rows = Math.max(1, Math.floor(height / bh));
+  const k = Math.max(1, Math.floor(budget / (bw * bh)));
+  // A single block larger than the whole budget is read in part: a window from
+  // its origin, shrunk to fit, so even one window stays within `budget`.
+  const shrink = bw * bh > budget ? Math.sqrt(budget / (bw * bh)) : 1;
+  const ww = Math.max(1, Math.floor(bw * shrink));
+  const wh = Math.max(1, Math.floor(bh * shrink));
+  let gx = cols, gy = rows;
+  if (cols * rows > k) {
+    // Cap gx at k as well as cols: a very wide raster would otherwise get a
+    // column per block and gy = 1, reading far more than `k` windows.
+    gx = Math.max(1, Math.min(cols, k, Math.round(Math.sqrt((k * cols) / rows))));
+    gy = Math.max(1, Math.min(rows, Math.floor(k / gx)));
+  }
+  const windows = [];
+  for (let j = 0; j < gy; j++) {
+    const y = Math.floor(((j + 0.5) * rows) / gy) * bh;
+    for (let i = 0; i < gx; i++) {
+      const x = Math.floor(((i + 0.5) * cols) / gx) * bw;
+      windows.push([x, y, Math.min(ww, width - x), Math.min(wh, height - y)]);
+    }
+  }
+  return windows;
+}
+
+/**
+ * The rescale window a render falls back to when the caller passes none.
+ *
+ * 8-bit data is already display-ready, so its full type range is the honest
+ * default; anything else keeps the historical `[0, 1]` (reflectance-style
+ * floats). Without this an 8-bit image rendered before its statistics arrive
+ * (or when they fail) clamps every pixel to the top of `[0, 1]` and paints
+ * solid white.
+ *
+ * @param {string} dtype - numpy-style dtype, e.g. `"uint8"`.
+ * @returns {[number, number]} The default `[min, max]`.
+ */
+export function defaultRescale(dtype) {
+  if (dtype === "uint8") return [0, 255];
+  if (dtype === "int8") return [-128, 127];
+  return [0, 1];
+}
