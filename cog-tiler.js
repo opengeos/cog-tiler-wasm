@@ -42,7 +42,7 @@ import {
   MAX_HEADER_TAIL,
   widenHeaderWindow,
 } from "./header-window.js";
-import { computeStats } from "./statistics.js";
+import { computeStats, defaultRescale, sampleWindows } from "./statistics.js";
 import { applySourceCrsResolver } from "./source-crs.js";
 
 export { setSourceCrsResolver } from "./source-crs.js";
@@ -119,11 +119,11 @@ function transferCurve(t, stretch, gamma) {
 }
 
 /** Normalize render rescale options to a list of [min,max] pairs (per band). */
-function rescaleList(opts) {
+function rescaleList(opts, fallback = [0, 1]) {
   if (Array.isArray(opts.rescale) && opts.rescale.length) {
     return Array.isArray(opts.rescale[0]) ? opts.rescale : [opts.rescale];
   }
-  return [[opts.min ?? 0, opts.max ?? 1]];
+  return [[opts.min ?? fallback[0], opts.max ?? fallback[1]]];
 }
 
 /** WGS84 [w,s,e,n] -> EPSG:3857 [minx,miny,maxx,maxy]. */
@@ -628,7 +628,7 @@ export class CogSource {
     const bands0 = wanted.map((b) => b - 1).filter((b) => b >= 0 && b < l0.bands);
     if (!bands0.length) bands0.push(0);
     const rgb = bands0.length >= 3;
-    const rescales = rescaleList(opts);
+    const rescales = rescaleList(opts, defaultRescale(dtypeOf(l0)));
     const colormap = opts.colormap || "viridis";
     const nodata = opts.nodata != null ? opts.nodata : this.nodata;
     const ndSet = nodata != null && !Number.isNaN(nodata);
@@ -844,7 +844,11 @@ export class CogSource {
   }
 
   /** Per-band statistics (≈ TiTiler `/cog/statistics`), from a decimated
-   *  overview (the largest one whose width is ≤ `maxSize`). */
+   *  overview (the largest one whose width is ≤ `maxSize`). When even the
+   *  coarsest level is far larger than that (a raster with no overviews),
+   *  the statistics come from an even spread of block-aligned windows
+   *  totalling about `maxSize`² pixels rather than the whole level, which
+   *  would decode the entire file or exceed the read-size limit. */
   async statistics({ maxSize = 1024 } = {}) {
     let level = this.levels.length - 1;
     for (let i = 0; i < this.levels.length; i++) {
@@ -852,9 +856,20 @@ export class CogSource {
     }
     const lv = this.levels[level];
     const nodata = this.nodata == null || Number.isNaN(this.nodata) ? null : this.nodata;
+    const budget = maxSize * maxSize;
+    const windows = lv.width * lv.height > 4 * budget
+      ? sampleWindows(lv.width, lv.height, lv.tile_width, lv.tile_height, budget)
+      : [[0, 0, lv.width, lv.height]];
     const out = {};
     for (let b = 0; b < lv.bands; b++) {
-      const buf = await this._assembleWindow(level, 0, 0, lv.width, lv.height, b);
+      const parts = [];
+      for (const [x, y, w, h] of windows) parts.push(await this._assembleWindow(level, x, y, w, h, b));
+      let buf = parts[0];
+      if (parts.length > 1) {
+        buf = new Float64Array(parts.reduce((n, p) => n + p.length, 0));
+        let o = 0;
+        for (const p of parts) { buf.set(p, o); o += p.length; }
+      }
       out[`b${b + 1}`] = computeStats(buf, nodata);
     }
     return out;
