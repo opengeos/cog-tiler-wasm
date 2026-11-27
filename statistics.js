@@ -68,9 +68,16 @@ export function sampleWindows(width, height, blockW, blockH, budget) {
   const cols = Math.max(1, Math.floor(width / bw));
   const rows = Math.max(1, Math.floor(height / bh));
   const k = Math.max(1, Math.floor(budget / (bw * bh)));
+  // A single block larger than the whole budget is read in part: a window from
+  // its origin, shrunk to fit, so even one window stays within `budget`.
+  const shrink = bw * bh > budget ? Math.sqrt(budget / (bw * bh)) : 1;
+  const ww = Math.max(1, Math.floor(bw * shrink));
+  const wh = Math.max(1, Math.floor(bh * shrink));
   let gx = cols, gy = rows;
   if (cols * rows > k) {
-    gx = Math.max(1, Math.min(cols, Math.round(Math.sqrt((k * cols) / rows))));
+    // Cap gx at k as well as cols: a very wide raster would otherwise get a
+    // column per block and gy = 1, reading far more than `k` windows.
+    gx = Math.max(1, Math.min(cols, k, Math.round(Math.sqrt((k * cols) / rows))));
     gy = Math.max(1, Math.min(rows, Math.floor(k / gx)));
   }
   const windows = [];
@@ -78,7 +85,7 @@ export function sampleWindows(width, height, blockW, blockH, budget) {
     const y = Math.floor(((j + 0.5) * rows) / gy) * bh;
     for (let i = 0; i < gx; i++) {
       const x = Math.floor(((i + 0.5) * cols) / gx) * bw;
-      windows.push([x, y, Math.min(bw, width - x), Math.min(bh, height - y)]);
+      windows.push([x, y, Math.min(ww, width - x), Math.min(wh, height - y)]);
     }
   }
   return windows;

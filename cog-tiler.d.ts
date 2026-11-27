@@ -6,7 +6,7 @@
 export interface RenderOptions {
   /** Low end of the rescale range. Default 0 (-128 for int8 data). */
   min?: number;
-  /** High end of the rescale range. Default 255 for 8-bit data, else 1. */
+  /** High end of the rescale range. Default 255 for uint8, 127 for int8, else 1. */
   max?: number;
   /** Per-band rescale `[[min,max], ...]`, or a single `[min,max]`. Overrides min/max. */
   rescale?: [number, number][] | [number, number];

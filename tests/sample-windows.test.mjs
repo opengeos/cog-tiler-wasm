@@ -32,6 +32,23 @@ test('handles untiled (striped) levels with a default block', () => {
   assert.ok(windows.every(([, , w, h]) => w === 256 && h === 256));
 });
 
+const total = (windows) => windows.reduce((n, [, , w, h]) => n + w * h, 0);
+
+test('keeps a very wide raster within the budget', () => {
+  const budget = 1 << 20;
+  const windows = sampleWindows(1048576, 256, 256, 256, budget);
+  assert.ok(windows.length <= budget / (256 * 256), `window count ${windows.length}`);
+  assert.ok(total(windows) <= budget);
+});
+
+test('shrinks the window when one block exceeds the budget', () => {
+  const budget = 256 * 256;
+  const windows = sampleWindows(4350, 6170, 1024, 1024, budget);
+  assert.equal(windows.length, 1);
+  assert.ok(total(windows) <= budget, `read ${total(windows)} pixels`);
+  assert.equal(windows[0][0] % 1024, 0, 'still starts on a block');
+});
+
 test('defaults 8-bit data to its full range, everything else to [0, 1]', () => {
   assert.deepEqual(defaultRescale('uint8'), [0, 255]);
   assert.deepEqual(defaultRescale('int8'), [-128, 127]);
